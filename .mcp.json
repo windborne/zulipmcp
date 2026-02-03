@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "zulip": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "zulipmcp.mcp"]
+    }
+  }
+}

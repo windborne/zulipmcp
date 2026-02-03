@@ -1,15 +1,18 @@
 import time
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
 
+import diskcache
 import zulip
 
 TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 _client: Optional[zulip.Client] = None
+_cache = diskcache.Cache(Path(__file__).parent.parent / ".cache")
 
 
 def get_client() -> zulip.Client:
@@ -214,6 +217,12 @@ def get_messages(hours_back: int = 24, channels: Optional[list[str]] = None,
     sender="John Dean" → auto-resolves name to email, filters by sender
     as_of=datetime(2025,6,1) → treat this as "now" (fetch hours_back before it)
     """
+    cache_key = ("get_messages", hours_back, tuple(channels) if channels else None,
+                 sender, as_of.isoformat() if as_of else None)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     client = get_client()
     anchor_time = int(as_of.timestamp()) if as_of else int(time.time())
     cutoff = anchor_time - (hours_back * 3600)
@@ -243,14 +252,22 @@ def get_messages(hours_back: int = 24, channels: Optional[list[str]] = None,
                 seen.add(m["id"])
                 unique.append(m)
         unique.sort(key=lambda m: m["id"])
+        _cache.set(cache_key, unique, expire=600)
         return unique
     else:
-        return _paginated_fetch(client, narrow, cutoff, anchor_time)
+        result = _paginated_fetch(client, narrow, cutoff, anchor_time)
+        _cache.set(cache_key, result, expire=600)
+        return result
 
 
 def _paginated_fetch(client: zulip.Client, narrow: list[dict],
                      cutoff: int, upper_bound: Optional[int] = None) -> list[dict]:
     """Paginate backward from newest in batches of 500 until time cutoff."""
+    cache_key = ("_paginated_fetch", tuple(tuple(d.items()) for d in narrow), cutoff, upper_bound)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     all_messages = []
     anchor = "newest"
     while True:
@@ -285,6 +302,7 @@ def _paginated_fetch(client: zulip.Client, narrow: list[dict],
             break
 
     all_messages.sort(key=lambda m: m["id"])
+    _cache.set(cache_key, all_messages, expire=600)
     return all_messages
 
 
@@ -477,3 +495,185 @@ def _get_sender_conversations(hours_back: int, channels: Optional[list[str]],
         return "No messages found."
 
     return format_topics(all_context_messages)
+
+
+# ============================================================================
+# Direct API wrappers — return raw Python objects for composability
+# ============================================================================
+
+def get_profile() -> dict:
+    """Get the bot's own profile. Returns the profile dict from the API."""
+    return get_client().get_profile()
+
+
+def list_streams(include_private: bool = False) -> list[dict]:
+    """List available streams. Returns list of stream dicts."""
+    result = get_client().get_streams(include_public=True, include_subscribed=True)
+    if result["result"] != "success":
+        return []
+    streams = result.get("streams", [])
+    if not include_private:
+        streams = [s for s in streams if not s.get("invite_only", False)]
+    return sorted(streams, key=lambda s: s["name"])
+
+
+def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
+    """Get recent topics in a stream. Returns list of topic dicts."""
+    client = get_client()
+    result = client.get_stream_id(stream)
+    if result["result"] != "success":
+        raise ValueError(f"Stream '{stream}' not found: {result.get('msg', '')}")
+    result = client.get_stream_topics(result["stream_id"])
+    if result["result"] != "success":
+        raise ValueError(f"Error fetching topics: {result.get('msg', '')}")
+    return result.get("topics", [])[:limit]
+
+
+def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
+                       before_message_id: Optional[int] = None) -> list[dict]:
+    """Get messages from a specific stream/topic. Returns raw message dicts sorted by ID."""
+    result = get_client().get_messages({
+        "narrow": [
+            {"operator": "stream", "operand": stream},
+            {"operator": "topic", "operand": topic},
+        ],
+        "anchor": before_message_id or "newest",
+        "num_before": min(num_messages, 100),
+        "num_after": 0,
+    })
+    if result["result"] != "success":
+        return []
+    msgs = result.get("messages", [])
+    msgs.sort(key=lambda m: m["id"])
+    return msgs
+
+
+def fetch_new_messages(stream: str, topic: str, after_id: int,
+                       exclude_user_id: Optional[int] = None) -> list[dict]:
+    """Fetch messages after a given ID, optionally excluding a user. Sorted by ID."""
+    result = get_client().get_messages({
+        "narrow": [
+            {"operator": "stream", "operand": stream},
+            {"operator": "topic", "operand": topic},
+        ],
+        "anchor": after_id,
+        "num_before": 0,
+        "num_after": 100,
+        "include_anchor": False,
+    })
+    if result["result"] != "success":
+        return []
+    msgs = result.get("messages", [])
+    if exclude_user_id:
+        msgs = [m for m in msgs if m.get("sender_id") != exclude_user_id]
+    msgs.sort(key=lambda m: m["id"])
+    return msgs
+
+
+def send_message(stream: str, topic: str, content: str) -> dict:
+    """Send a message. Returns API result dict with 'id' on success."""
+    return get_client().send_message({
+        "type": "stream",
+        "to": stream,
+        "subject": topic,
+        "content": content,
+    })
+
+
+def add_reaction(message_id: int, emoji_name: str) -> dict:
+    """Add emoji reaction to a message. Returns API result dict."""
+    return get_client().add_reaction({
+        "message_id": message_id,
+        "emoji_name": emoji_name,
+    })
+
+
+def remove_reaction(message_id: int, emoji_name: str) -> dict:
+    """Remove emoji reaction from a message. Returns API result dict."""
+    return get_client().remove_reaction({
+        "message_id": message_id,
+        "emoji_name": emoji_name,
+        "reaction_type": "realm_emoji",
+    })
+
+
+def get_user_info(email: str) -> Optional[dict]:
+    """Get user info by email. Returns user dict or None."""
+    result = get_client().call_endpoint(url=f"/users/{email}", method="GET")
+    if result.get("result") != "success":
+        return None
+    return result["user"]
+
+
+def get_message_by_id(message_id: int) -> Optional[dict]:
+    """Get a specific message by ID. Returns message dict or None."""
+    result = get_client().get_raw_message(message_id)
+    if result.get("result") != "success":
+        return None
+    return result["message"]
+
+
+def get_subscribed_streams() -> list[dict]:
+    """Get streams the bot is subscribed to. Returns list of subscription dicts."""
+    result = get_client().get_subscriptions()
+    if result["result"] != "success":
+        return []
+    return sorted(result.get("subscriptions", []), key=lambda s: s["name"])
+
+
+def download_file(path: str) -> tuple[bytes, str]:
+    """Download a file from Zulip. Returns (content_bytes, content_type).
+
+    Raises ValueError on any download error.
+    """
+    client = get_client()
+    client.ensure_session()
+    if client.session is None:
+        raise ValueError("Failed to create Zulip session")
+
+    base = client.base_url.rstrip("/")
+    if base.endswith("/api"):
+        base = base[:-4]
+    if not path.startswith("/"):
+        path = "/" + path
+
+    response = client.session.get(base + path, timeout=30)
+    if response.status_code != 200:
+        raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
+    content_type = response.headers.get("Content-Type", "application/octet-stream")
+    return response.content, content_type
+
+
+def save_file(path: str, save_dir: Optional[str] = None) -> tuple[str, int, str]:
+    """Download a Zulip file and save it locally.
+
+    Returns (saved_path, size_bytes, content_type).
+    """
+    content, content_type = download_file(path)
+    filename = Path(path).name
+
+    if save_dir:
+        save_path = Path(save_dir) / filename
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        save_path = Path(tempfile.mkdtemp()) / filename
+
+    save_path.write_bytes(content)
+    return str(save_path), len(content), content_type
+
+
+def save_image(path: str) -> str:
+    """Download a Zulip image and save to a temp file. Returns the temp file path."""
+    content, content_type = download_file(path)
+
+    ext_map = {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+        "image/webp": ".webp", "image/svg+xml": ".svg",
+    }
+    ext = ext_map.get((content_type or "").split(";")[0].strip(), "")
+    if not ext:
+        ext = Path(path).suffix.lower() if Path(path).suffix.lower() in ext_map.values() else ".bin"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
+        f.write(content)
+        return f.name
