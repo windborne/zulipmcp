@@ -735,7 +735,11 @@ def download_file(path: str) -> tuple[bytes, str]:
         path = "/" + path
 
     response = client.session.get(base + path, timeout=30)
-    if response.status_code != 200:
+    if response.status_code == 403:
+        raise ValueError(f"Access denied (403). The bot may not have permission to access: {path}")
+    elif response.status_code == 404:
+        raise ValueError(f"File not found (404): {path}")
+    elif response.status_code != 200:
         raise ValueError(f"HTTP {response.status_code}: {response.text[:200]}")
     content_type = response.headers.get("Content-Type", "application/octet-stream")
     return response.content, content_type
