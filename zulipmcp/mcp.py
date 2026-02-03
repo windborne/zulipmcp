@@ -184,7 +184,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     try:
         start = time.time()
         end = start + timeout_seconds
-        last_progress = start
+        last_heartbeat = start
 
         while time.time() < end:
             messages = zulip_core.fetch_new_messages(
@@ -196,9 +196,14 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                 return "New messages:\n\n" + zulip_core.format_messages(messages)
 
             now = time.time()
-            if now - last_progress >= 10:
-                await ctx.report_progress(progress=int(now - start), total=timeout_seconds)
-                last_progress = now
+            if now - last_heartbeat >= 10:
+                elapsed = int(now - start)
+                # Use ctx.info() as keep-alive — report_progress is a no-op
+                # when the client doesn't send a progressToken, which causes
+                # the MCP connection to timeout during long polls.
+                await ctx.info(f"Listening… {elapsed}s elapsed")
+                await ctx.report_progress(progress=elapsed, total=timeout_seconds)
+                last_heartbeat = now
 
             await asyncio.sleep(2)
 
