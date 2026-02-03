@@ -28,16 +28,30 @@ def get_ignored_streams() -> set[str]:
 
 
 def get_client() -> zulip.Client:
+    """Get or create the Zulip client singleton.
+
+    Config resolution order:
+        1. ZULIP_RC_PATH environment variable (absolute path to zuliprc)
+        2. .zuliprc in the current working directory
+    """
     global _client
     if _client is None:
         import os
+        import sys
         rc_env = os.environ.get("ZULIP_RC_PATH")
         if rc_env:
             config_path = Path(rc_env)
         else:
-            config_path = Path(__file__).parent.parent / ".zuliprc"
-        assert config_path.exists(), f"zuliprc not found at: {config_path}"
+            config_path = Path.cwd() / ".zuliprc"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"zuliprc not found at: {config_path}\n"
+                f"Set ZULIP_RC_PATH env var or place .zuliprc in the working directory."
+            )
         _client = zulip.Client(config_file=str(config_path))
+        # Log identity so it's visible in MCP startup output
+        email = _client.email or "unknown"
+        print(f"[zulipmcp] Zulip client initialized as: {email} (from {config_path})", file=sys.stderr)
     return _client
 
 
