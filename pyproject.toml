@@ -7,3 +7,6 @@ dependencies = [
     "fastmcp",
     "zulip",
 ]
+
+[tool.setuptools.packages.find]
+include = ["zulipmcp*"]

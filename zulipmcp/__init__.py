@@ -1,6 +1,7 @@
 from .core import (
     get_client,
     get_user_email,
+    resolve_name,
     get_messages,
     format_messages,
     format_topics,
@@ -15,7 +16,9 @@ from .core import (
     remove_reaction,
     get_user_info,
     get_message_by_id,
+    get_message_link,
     get_subscribed_streams,
+    get_stream_members,
     download_file,
     save_file,
     save_image,

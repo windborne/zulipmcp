@@ -18,7 +18,7 @@ _cache = diskcache.Cache(Path(__file__).parent.parent / ".cache")
 def get_client() -> zulip.Client:
     global _client
     if _client is None:
-        config_path = Path(".zuliprc")
+        config_path = Path(__file__).parent.parent / ".zuliprc"
         assert config_path.exists(), f"zuliprc not found at: {config_path}"
         _client = zulip.Client(config_file=str(config_path))
     return _client
@@ -34,6 +34,26 @@ def get_user_email(full_name: str) -> Optional[str]:
         if user["full_name"] == full_name:
             return user["email"]
     return None
+
+
+def resolve_name(query: str) -> list[dict]:
+    """Find active users whose display name contains the query (case-insensitive).
+
+    Returns list of dicts with 'full_name' and 'email' for each match.
+    """
+    client = get_client()
+    result = client.get_users()
+    if result["result"] != "success":
+        return []
+    q = query.lower()
+    matches = []
+    for user in result["members"]:
+        if user.get("is_bot", False) or not user.get("is_active", True):
+            continue
+        if q in user["full_name"].lower():
+            matches.append({"full_name": user["full_name"], "email": user["email"]})
+    matches.sort(key=lambda u: u["full_name"])
+    return matches
 
 
 class _ZulipHTMLParser(HTMLParser):
@@ -613,12 +633,53 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     return result["message"]
 
 
+def get_message_link(message_id: int) -> str:
+    """Return a Zulip markdown link to a message: [#stream > topic](url).
+
+    Falls back to a bare URL if the message can't be fetched.
+    """
+    client = get_client()
+    base = client.base_url.rstrip("/")
+    if base.endswith("/api"):
+        base = base[:-4]
+    url = f"{base}/#narrow/id/{message_id}"
+
+    msg = get_message_by_id(message_id)
+    if msg:
+        stream = msg.get("display_recipient", "")
+        topic = msg.get("subject", "")
+        return f"[#{stream} > {topic}]({url})"
+    return f"[message]({url})"
+
+
 def get_subscribed_streams() -> list[dict]:
     """Get streams the bot is subscribed to. Returns list of subscription dicts."""
     result = get_client().get_subscriptions()
     if result["result"] != "success":
         return []
     return sorted(result.get("subscriptions", []), key=lambda s: s["name"])
+
+
+def get_stream_members(stream: str) -> list[dict]:
+    """Get members of a stream. Returns list of user dicts with 'full_name' and 'email'."""
+    client = get_client()
+    result = client.get_stream_id(stream)
+    if result["result"] != "success":
+        raise ValueError(f"Stream '{stream}' not found: {result.get('msg', '')}")
+    stream_id = result["stream_id"]
+    result = client.call_endpoint(url=f"/streams/{stream_id}/members", method="GET")
+    if result.get("result") != "success":
+        raise ValueError(f"Error fetching members: {result.get('msg', '')}")
+    # Resolve user IDs to names/emails
+    user_ids = set(result.get("subscribers", []))
+    users_result = client.get_users()
+    if users_result["result"] != "success":
+        return []
+    members = []
+    for user in users_result["members"]:
+        if user["user_id"] in user_ids:
+            members.append({"full_name": user["full_name"], "email": user["email"]})
+    return sorted(members, key=lambda u: u["full_name"])
 
 
 def download_file(path: str) -> tuple[bytes, str]:

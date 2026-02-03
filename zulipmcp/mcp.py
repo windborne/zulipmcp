@@ -209,6 +209,25 @@ def get_stream_topics(stream: str, limit: int = 20) -> str:
 
 
 @mcp.tool()
+def get_stream_members(stream: str) -> str:
+    """Get the members of a stream/channel.
+
+    Args:
+        stream: Stream/channel name.
+    """
+    try:
+        members = zulip_core.get_stream_members(stream)
+    except ValueError as e:
+        return f"Error: {e}"
+    if not members:
+        return f"No members found in #{stream}."
+    lines = [f"#{stream} has {len(members)} member(s):"]
+    for u in members:
+        lines.append(f"- {u['full_name']} ({u['email']})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def get_messages(stream: str, topic: str, num_messages: int = 20,
                  before_message_id: Optional[int] = None) -> str:
     """Get messages from a specific stream and topic.
@@ -238,6 +257,16 @@ def get_message_by_id(message_id: int) -> str:
     if not msg:
         return f"Message {message_id} not found."
     return zulip_core.format_messages([msg], include_topic=True)
+
+
+@mcp.tool()
+def get_message_link(message_id: int) -> str:
+    """Get a permalink for a Zulip message.
+
+    Args:
+        message_id: The message ID.
+    """
+    return zulip_core.get_message_link(message_id)
 
 
 # ============================================================================
@@ -296,6 +325,27 @@ def get_user_info(email: str) -> str:
     ]
     if user.get("timezone"):
         lines.append(f"Timezone: {user['timezone']}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def resolve_name(query: str) -> str:
+    """Look up a user's display name by substring before mentioning them.
+
+    Call this BEFORE using @**Name** in a message if you're not 100% sure of the
+    exact display name. Zulip mentions require an exact match.
+
+    Args:
+        query: Substring to search for (case-insensitive). e.g. "john", "smith".
+    """
+    matches = zulip_core.resolve_name(query)
+    if not matches:
+        return f"No active users matching \"{query}\"."
+    lines = [f"Found {len(matches)} user(s) matching \"{query}\":"]
+    for u in matches:
+        lines.append(f"- {u['full_name']} ({u['email']})")
+    if len(matches) == 1:
+        lines.append(f"\nTo mention them: @**{matches[0]['full_name']}**")
     return "\n".join(lines)
 
 
