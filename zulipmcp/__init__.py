@@ -1,3 +1,5 @@
+from .mcp import configure, mcp
+
 from .core import (
     get_client,
     get_user_email,

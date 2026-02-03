@@ -22,6 +22,48 @@ from . import core as zulip_core
 mcp = FastMCP("Zulip Messaging")
 
 
+# ============================================================================
+# Hook system — allows callers to customize MCP behavior without forking
+# ============================================================================
+
+_hooks: dict = {
+    "message_prefix": None,   # () -> str : prepended to reply() and send_message()
+    "on_session_end": None,   # () -> None : called when end_session() runs
+    "on_set_context": None,   # (stream, topic) -> str : extra text appended to set_context response
+}
+
+
+def configure(**kwargs):
+    """Configure optional hooks for the MCP server.
+
+    Supported hooks:
+        message_prefix: callable() -> str
+            Returns a prefix string prepended to all outgoing messages
+            (reply and send_message). Return "" to skip.
+        on_session_end: callable() -> None
+            Called when end_session() is invoked. Use for cleanup
+            (e.g. writing exit markers).
+        on_set_context: callable(stream: str, topic: str) -> str
+            Returns extra text to append to the set_context response
+            (e.g. custom instructions, prompts).
+    """
+    for key, value in kwargs.items():
+        if key not in _hooks:
+            raise ValueError(f"Unknown hook: {key!r}. Valid hooks: {list(_hooks.keys())}")
+        _hooks[key] = value
+
+
+def _get_prefix() -> str:
+    """Get message prefix from hook, or empty string."""
+    fn = _hooks.get("message_prefix")
+    if fn:
+        try:
+            return fn()
+        except Exception:
+            return ""
+    return ""
+
+
 @dataclass
 class SessionState:
     """Tracks the current conversation session."""
@@ -65,7 +107,19 @@ def set_context(stream: str, topic: str) -> str:
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
 
-    header = f"Session context set to #{stream} > {topic}\n\nRecent messages:"
+    header = f"Session context set to #{stream} > {topic}"
+
+    # Allow hook to inject extra context (e.g. custom instructions)
+    on_set_ctx = _hooks.get("on_set_context")
+    if on_set_ctx:
+        try:
+            extra = on_set_ctx(stream, topic)
+            if extra:
+                header += "\n\n" + extra
+        except Exception:
+            pass
+
+    header += "\n\nRecent messages:"
     return header + "\n\n" + zulip_core.format_messages(messages, include_topic=False)
 
 
@@ -87,7 +141,8 @@ def reply(content: str) -> str:
             _session.last_seen_message_id, _session.my_user_id,
         )
 
-    result = zulip_core.send_message(_session.stream, _session.topic, content)
+    prefix = _get_prefix()
+    result = zulip_core.send_message(_session.stream, _session.topic, prefix + content)
     if result["result"] != "success":
         return f"Error sending message: {result.get('msg', 'Unknown error')}"
 
@@ -115,10 +170,14 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
 
     timeout_seconds = timeout_hours * 3600
 
+    # Save the message ID before the loop — the session field gets updated
+    # when new messages arrive, so we need the original to remove the emoji.
+    listen_msg_id = _session.last_seen_message_id
+
     # Add listening indicator
-    if _session.last_seen_message_id:
+    if listen_msg_id:
         try:
-            zulip_core.add_reaction(_session.last_seen_message_id, "robot_ear")
+            zulip_core.add_reaction(listen_msg_id, "robot_ear")
         except Exception:
             pass
 
@@ -148,9 +207,9 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             "[Hint: Send a check-in message, then wait again with exponential backoff.]"
         )
     finally:
-        if _session.last_seen_message_id:
+        if listen_msg_id:
             try:
-                zulip_core.remove_reaction(_session.last_seen_message_id, "robot_ear")
+                zulip_core.remove_reaction(listen_msg_id, "robot_ear")
             except Exception:
                 pass
 
@@ -161,6 +220,14 @@ def end_session() -> str:
     if not _session.active:
         return "No active session to end."
     info = f"Session ended. Was chatting in #{_session.stream} > {_session.topic}"
+
+    on_end = _hooks.get("on_session_end")
+    if on_end:
+        try:
+            on_end()
+        except Exception:
+            pass
+
     _session.reset()
     return info
 
@@ -282,7 +349,8 @@ def send_message(stream: str, topic: str, content: str) -> str:
         topic: Topic name.
         content: Message content (supports Zulip markdown).
     """
-    result = zulip_core.send_message(stream, topic, content)
+    prefix = _get_prefix()
+    result = zulip_core.send_message(stream, topic, prefix + content)
     if result["result"] != "success":
         return f"Error sending message: {result.get('msg', 'Unknown error')}"
     return f"Message sent to #{stream} > {topic} (id: {result.get('id')})"
