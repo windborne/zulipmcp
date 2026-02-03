@@ -30,7 +30,12 @@ def get_ignored_streams() -> set[str]:
 def get_client() -> zulip.Client:
     global _client
     if _client is None:
-        config_path = Path(__file__).parent.parent / ".zuliprc"
+        import os
+        rc_env = os.environ.get("ZULIP_RC_PATH")
+        if rc_env:
+            config_path = Path(rc_env)
+        else:
+            config_path = Path(__file__).parent.parent / ".zuliprc"
         assert config_path.exists(), f"zuliprc not found at: {config_path}"
         _client = zulip.Client(config_file=str(config_path))
     return _client
