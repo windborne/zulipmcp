@@ -13,6 +13,18 @@ TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 _client: Optional[zulip.Client] = None
 _cache = diskcache.Cache(Path(__file__).parent.parent / ".cache")
+_ignored_streams: set[str] = set()
+
+
+def set_ignored_streams(streams: set[str]) -> None:
+    """Set streams to exclude from all message fetches."""
+    global _ignored_streams
+    _ignored_streams = {s.lower() for s in streams}
+
+
+def get_ignored_streams() -> set[str]:
+    """Return the current ignored streams set."""
+    return _ignored_streams
 
 
 def get_client() -> zulip.Client:
@@ -322,6 +334,11 @@ def _paginated_fetch(client: zulip.Client, narrow: list[dict],
             break
 
     all_messages.sort(key=lambda m: m["id"])
+    if _ignored_streams:
+        all_messages = [
+            m for m in all_messages
+            if m.get("display_recipient", "").lower() not in _ignored_streams
+        ]
     _cache.set(cache_key, all_messages, expire=600)
     return all_messages
 
