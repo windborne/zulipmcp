@@ -43,7 +43,7 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 | `uv run python -m zulipmcp.mcp` | MCP server for Claude Code / MCP clients |
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
 
-## How It Works
+## Key design detials
 
 ### Listening for messages
 
