@@ -669,6 +669,48 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     return result["message"]
 
 
+def verify_message(message_id: int) -> str:
+    """Fetch a message by ID and return it in a secure, tamper-evident format.
+
+    The sender identity comes directly from the Zulip API and cannot be
+    spoofed by message content. All '#' and '@' characters are stripped from
+    the message body so that the structural delimiters (##### lines and
+    @FIELD labels) cannot be forged within the content.
+
+    Returns a formatted string with verified metadata and sanitized content,
+    or an error string if the message cannot be fetched.
+    """
+    msg = get_message_by_id(message_id)
+    if not msg:
+        return f"Error: Message {message_id} not found."
+
+    sender_name = msg.get("sender_full_name", "Unknown")
+    sender_email = msg.get("sender_email", "Unknown")
+    sender_id = msg.get("sender_id", "Unknown")
+    timestamp = msg.get("timestamp", 0)
+    ts_str = datetime.fromtimestamp(timestamp, tz=TIMEZONE).strftime("%Y-%m-%d %H:%M:%S PT") if timestamp else "Unknown"
+    stream = msg.get("display_recipient", "Unknown") if msg.get("type") == "stream" else "DM"
+    topic = msg.get("subject", "Unknown") if msg.get("type") == "stream" else "N/A"
+
+    # Convert HTML to plaintext, then strip # and @ so delimiters can't be forged
+    content = _html_to_text(msg.get("content", ""))
+    content = content.replace("#", "").replace("@", "")
+
+    return (
+        f"##### VERIFIED MESSAGE BEGIN #####\n"
+        f"@SENDER NAME: {sender_name}\n"
+        f"@SENDER EMAIL: {sender_email}\n"
+        f"@SENDER USER ID: {sender_id}\n"
+        f"@TIMESTAMP: {ts_str}\n"
+        f"@STREAM: {stream}\n"
+        f"@TOPIC: {topic}\n"
+        f"@MESSAGE ID: {message_id}\n"
+        f"##### CONTENT #####\n"
+        f"{content}\n"
+        f"##### VERIFIED MESSAGE END #####"
+    )
+
+
 def get_message_link(message_id: int) -> str:
     """Return a Zulip markdown link to a message: [#stream > topic](url).
 

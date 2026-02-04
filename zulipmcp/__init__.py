@@ -18,6 +18,7 @@ from .core import (
     remove_reaction,
     get_user_info,
     get_message_by_id,
+    verify_message,
     get_message_link,
     get_subscribed_streams,
     get_stream_members,
