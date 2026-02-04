@@ -10,28 +10,28 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 
 ## Using with Claude Code
 
-Install the package:
+1. Install the package:
 
-```bash
-uv add zulipmcp --git ssh://git@github.com/windborne/zulipmcp.git
-```
+   ```bash
+   uv add zulipmcp --git ssh://git@github.com/windborne/zulipmcp.git
+   ```
 
-Add a `.zuliprc` file to your project root with your Zulip bot credentials.
+2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Configuring the Python bindings](https://zulip.com/api/configuring-python-bindings) for details on the file format and how to download one from your Zulip organization.
 
-Add the MCP server to your `.mcp.json`:
+3. Add the MCP server to your `.mcp.json`:
 
-```json
-{
-  "mcpServers": {
-    "zulip": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "zulipmcp.mcp"]
-    }
-  }
-}
-```
+   ```json
+   {
+     "mcpServers": {
+       "zulip": {
+         "command": "uv",
+         "args": ["run", "python", "-m", "zulipmcp.mcp"]
+       }
+     }
+   }
+   ```
 
-Restart Claude Code. The Zulip tools should now be available.
+4. Restart Claude Code. The Zulip tools should now be available.
 
 ## Entry Points
 
