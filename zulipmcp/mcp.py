@@ -11,10 +11,33 @@ Usage:
 
 import time
 import asyncio
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
+
+# ============================================================================
+# Logging setup — file-based for debugging MCP connection issues
+# ============================================================================
+
+_log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
+_log_dir.mkdir(parents=True, exist_ok=True)
+_log_file = _log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(_log_file),
+        logging.StreamHandler(),  # also stderr for immediate visibility
+    ]
+)
+_logger = logging.getLogger("zulipmcp")
+_logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={_log_file}")
 from fastmcp.server.context import Context
 
 from . import core as zulip_core
@@ -95,9 +118,12 @@ def set_context(stream: str, topic: str) -> str:
         stream: Stream/channel name.
         topic: Topic name within the stream.
     """
+    _logger.info(f"set_context() called: stream={stream}, topic={topic}")
+
     profile = zulip_core.get_profile()
     if profile.get("result") == "success":
         _session.my_user_id = profile.get("user_id")
+        _logger.debug(f"set_context: user_id={_session.my_user_id}")
 
     _session.stream = stream
     _session.topic = topic
@@ -106,6 +132,7 @@ def set_context(stream: str, topic: str) -> str:
     messages = zulip_core.get_topic_messages(stream, topic, num_messages=20)
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
+        _logger.debug(f"set_context: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
 
     header = f"Session context set to #{stream} > {topic}"
 
@@ -120,6 +147,7 @@ def set_context(stream: str, topic: str) -> str:
             pass
 
     header += "\n\nRecent messages:"
+    _logger.info(f"set_context() completed successfully")
     return header + "\n\n" + zulip_core.format_messages(messages, include_topic=False)
 
 
@@ -130,7 +158,10 @@ def reply(content: str) -> str:
     Args:
         content: Message content (supports Zulip markdown).
     """
+    _logger.info(f"reply() called: content_len={len(content)}")
+
     if not _session.active or not _session.stream or not _session.topic:
+        _logger.warning("reply() called with no session context")
         return "Error: No session context set. Call set_context first."
 
     # Check for missed messages before sending
@@ -140,15 +171,19 @@ def reply(content: str) -> str:
             _session.stream, _session.topic,
             _session.last_seen_message_id, _session.my_user_id,
         )
+        if missed:
+            _logger.debug(f"reply() found {len(missed)} missed messages")
 
     prefix = _get_prefix()
     result = zulip_core.send_message(_session.stream, _session.topic, prefix + content)
     if result["result"] != "success":
+        _logger.error(f"reply() send_message failed: {result}")
         return f"Error sending message: {result.get('msg', 'Unknown error')}"
 
     sent_id = result.get("id")
     _session.last_seen_message_id = sent_id
     response = f"Message sent (id: {sent_id})"
+    _logger.info(f"reply() sent message id={sent_id}")
 
     if missed:
         _session.last_seen_message_id = missed[-1]["id"]
@@ -165,7 +200,11 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     Args:
         timeout_hours: Max wait time in hours. Default to 1.
     """
+    listen_id = f"listen_{int(time.time())}_{os.getpid()}"
+    _logger.info(f"[{listen_id}] listen() START: timeout_hours={timeout_hours}, stream={_session.stream}, topic={_session.topic}")
+
     if not _session.active or not _session.stream or not _session.topic:
+        _logger.warning(f"[{listen_id}] No session context set")
         return "Error: No session context set. Call set_context first."
 
     timeout_seconds = timeout_hours * 3600
@@ -173,56 +212,87 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     # Save the message ID before the loop — the session field gets updated
     # when new messages arrive, so we need the original to remove the emoji.
     listen_msg_id = _session.last_seen_message_id
+    _logger.debug(f"[{listen_id}] Starting from message_id={listen_msg_id}")
 
     # Add listening indicator
     if listen_msg_id:
         try:
             zulip_core.add_reaction(listen_msg_id, "robot_ear")
-        except Exception:
-            pass
+            _logger.debug(f"[{listen_id}] Added robot_ear reaction")
+        except Exception as e:
+            _logger.warning(f"[{listen_id}] Failed to add reaction: {e}")
 
     try:
         start = time.time()
         end = start + timeout_seconds
         last_heartbeat = start
+        iteration = 0
 
         while time.time() < end:
-            messages = zulip_core.fetch_new_messages(
-                _session.stream, _session.topic,
-                _session.last_seen_message_id, _session.my_user_id,
-            )
+            iteration += 1
+            try:
+                messages = zulip_core.fetch_new_messages(
+                    _session.stream, _session.topic,
+                    _session.last_seen_message_id, _session.my_user_id,
+                )
+            except Exception as e:
+                _logger.error(f"[{listen_id}] iter={iteration} fetch_new_messages EXCEPTION: {type(e).__name__}: {e}")
+                raise
+
             if messages:
                 _session.last_seen_message_id = messages[-1]["id"]
+                _logger.info(f"[{listen_id}] iter={iteration} GOT {len(messages)} messages, returning")
                 return "New messages:\n\n" + zulip_core.format_messages(messages)
 
             now = time.time()
             if now - last_heartbeat >= 10:
                 elapsed = int(now - start)
+                _logger.debug(f"[{listen_id}] iter={iteration} heartbeat elapsed={elapsed}s")
                 # Use ctx.info() as keep-alive — report_progress is a no-op
                 # when the client doesn't send a progressToken, which causes
                 # the MCP connection to timeout during long polls.
-                await ctx.info(f"Listening… {elapsed}s elapsed")
-                await ctx.report_progress(progress=elapsed, total=timeout_seconds)
+                try:
+                    await ctx.info(f"Listening… {elapsed}s elapsed")
+                    await ctx.report_progress(progress=elapsed, total=timeout_seconds)
+                except Exception as e:
+                    _logger.error(f"[{listen_id}] iter={iteration} ctx.info/report_progress EXCEPTION: {type(e).__name__}: {e}")
+                    raise
                 last_heartbeat = now
 
-            await asyncio.sleep(2)
+            try:
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                _logger.warning(f"[{listen_id}] iter={iteration} asyncio.CancelledError during sleep")
+                raise
+            except Exception as e:
+                _logger.error(f"[{listen_id}] iter={iteration} asyncio.sleep EXCEPTION: {type(e).__name__}: {e}")
+                raise
 
+        _logger.info(f"[{listen_id}] TIMEOUT after {timeout_hours} hours, iter={iteration}")
         return (
             f"Timeout: No new messages after {timeout_hours} hours.\n\n"
             "[Hint: Send a check-in message, then wait again with exponential backoff.]"
         )
+    except Exception as e:
+        _logger.error(f"[{listen_id}] UNHANDLED EXCEPTION in listen loop: {type(e).__name__}: {e}", exc_info=True)
+        raise
     finally:
+        _logger.info(f"[{listen_id}] listen() FINALLY block executing")
         if listen_msg_id:
             try:
                 zulip_core.remove_reaction(listen_msg_id, "robot_ear")
-            except Exception:
-                pass
+                _logger.debug(f"[{listen_id}] Removed robot_ear reaction")
+            except Exception as e:
+                _logger.warning(f"[{listen_id}] Failed to remove reaction: {e}")
 
 
 @mcp.tool()
 def end_session() -> str:
     """End the current session gracefully."""
+    _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}")
+
     if not _session.active:
+        _logger.warning("end_session() called with no active session")
         return "No active session to end."
     info = f"Session ended. Was chatting in #{_session.stream} > {_session.topic}"
 
@@ -230,10 +300,11 @@ def end_session() -> str:
     if on_end:
         try:
             on_end()
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.warning(f"end_session() on_end hook failed: {e}")
 
     _session.reset()
+    _logger.info("end_session() completed")
     return info
 
 
