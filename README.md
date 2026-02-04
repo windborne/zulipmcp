@@ -40,6 +40,18 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 | `uv run python -m zulipmcp.mcp` | MCP server for Claude Code / MCP clients |
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
 
+## How It Works
+
+### Listening for messages
+
+The `listen` tool polls for new messages every 2 seconds using `fetch_new_messages`, which queries the Zulip API for messages strictly after the last seen message ID (using `include_anchor: False`). The bot's own messages are filtered out by user ID so it doesn't react to itself.
+
+While listening, a `robot_ear` emoji is added to the last message as a visual indicator and removed when listening stops (via a `finally` block, so it always cleans up). Heartbeat pings are sent to the MCP client every 10 seconds via `ctx.info()` to keep the connection alive during long polls.
+
+### No missed messages on reply
+
+When `reply` is called, it checks for new messages *before* sending. If anyone posted while the LLM was thinking, those messages are fetched and returned alongside the "message sent" confirmation. This way the LLM always sees what it missed and can react accordingly. The `last_seen_message_id` is updated to whichever is newest — the missed messages or the sent message — so nothing falls through the cracks.
+
 ## Style Notes
 
 Keep code in core.py elegant, short, and simple.
