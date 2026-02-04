@@ -1,5 +1,8 @@
 # zulipmcp
 
+<img width="1446" height="752" alt="image" src="https://github.com/user-attachments/assets/6e6bbed7-ed19-4c4a-a9f2-48468dc9a570" />
+
+
 Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into concise XML suitable for LLM consumption. Usable as a Python library or as an MCP server.
 
 ## Requirements
