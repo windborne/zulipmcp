@@ -820,3 +820,31 @@ def save_image(path: str) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
         f.write(content)
         return f.name
+
+
+def upload_file(file_path: str) -> tuple[str, str]:
+    """Upload a local file to Zulip.
+
+    Args:
+        file_path: Absolute path to the file to upload.
+
+    Returns:
+        Tuple of (uri, filename) where uri is the Zulip upload path like
+        "/user_uploads/2/ab/cdef/image.png".
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist.
+        ValueError: If the upload fails.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    client = get_client()
+    with open(path, "rb") as f:
+        result = client.upload_file(f)
+
+    if result.get("result") != "success":
+        raise ValueError(f"Upload failed: {result.get('msg', 'Unknown error')}")
+
+    return result["uri"], path.name

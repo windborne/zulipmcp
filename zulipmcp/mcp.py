@@ -95,12 +95,14 @@ class SessionState:
     last_seen_message_id: Optional[int] = None
     my_user_id: Optional[int] = None
     active: bool = False
+    started_at: Optional[float] = None
 
     def reset(self):
         self.stream = None
         self.topic = None
         self.last_seen_message_id = None
         self.active = False
+        self.started_at = None
 
 
 _session = SessionState()
@@ -128,6 +130,7 @@ def set_context(stream: str, topic: str) -> str:
     _session.stream = stream
     _session.topic = topic
     _session.active = True
+    _session.started_at = time.time()
 
     messages = zulip_core.get_topic_messages(stream, topic, num_messages=20)
     if messages:
@@ -288,7 +291,10 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
 
 @mcp.tool()
 def end_session() -> str:
-    """End the current session gracefully."""
+    """End the current session gracefully (without farewell message).
+
+    Prefer sign_off() instead, which posts a farewell and then ends the session.
+    """
     _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}")
 
     if not _session.active:
@@ -306,6 +312,54 @@ def end_session() -> str:
     _session.reset()
     _logger.info("end_session() completed")
     return info
+
+
+@mcp.tool()
+def sign_off(message: str = "") -> str:
+    """Post a farewell message and end the session gracefully.
+
+    This is the preferred way to end a session. It posts a farewell to the
+    current stream/topic, then ends the session.
+
+    Args:
+        message: Optional custom farewell message. If empty, uses a default.
+    """
+    _logger.info(f"sign_off() called: stream={_session.stream}, topic={_session.topic}")
+
+    if not _session.active or not _session.stream or not _session.topic:
+        _logger.warning("sign_off() called with no active session")
+        return "No active session to sign off from."
+
+    # Calculate session stats
+    duration_secs = int(time.time() - _session.started_at) if _session.started_at else 0
+    if duration_secs < 60:
+        duration_str = f"{duration_secs}s"
+    else:
+        mins = duration_secs // 60
+        duration_str = f"{mins}m"
+
+    # Build farewell message
+    if message:
+        farewell = message
+    else:
+        farewell = ":wave: Signing off"
+
+    farewell += f" | {duration_str}"
+
+    # Post the farewell
+    prefix = _get_prefix()
+    result = zulip_core.send_message(_session.stream, _session.topic, prefix + farewell)
+    if result["result"] != "success":
+        _logger.error(f"sign_off() send_message failed: {result}")
+        # Still end the session even if farewell fails
+    else:
+        _logger.info(f"sign_off() posted farewell")
+
+    # End the session
+    stream, topic = _session.stream, _session.topic
+    _session.reset()
+    _logger.info("sign_off() completed")
+    return f"Signed off from #{stream} > {topic}"
 
 
 # ============================================================================
@@ -542,7 +596,7 @@ def get_subscribed_streams() -> str:
 
 
 # ============================================================================
-# File tools — downloading uploads
+# File tools — downloading and uploading
 # ============================================================================
 
 @mcp.tool()
@@ -572,6 +626,29 @@ def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     except ValueError as e:
         return f"Error fetching file: {e}"
     return f"File saved to: {saved_path}\nSize: {size_bytes / 1024:.1f} KB\nContent-Type: {content_type}"
+
+
+@mcp.tool()
+def upload_file(file_path: str) -> str:
+    """Upload a local file to Zulip and return markdown to embed it in messages.
+
+    Args:
+        file_path: Absolute path to the file to upload.
+
+    Returns:
+        Markdown that can be pasted into a message to embed the file.
+        For images, this displays the image inline.
+        For other files, this creates a download link.
+    """
+    try:
+        uri, filename = zulip_core.upload_file(file_path)
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except ValueError as e:
+        return f"Error uploading file: {e}"
+
+    # Return markdown that embeds the file
+    return f"File uploaded successfully.\n\nTo embed in a message, use:\n[{filename}]({uri})"
 
 
 # ============================================================================
