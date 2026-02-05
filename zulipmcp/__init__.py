@@ -16,6 +16,7 @@ from .core import (
     send_message,
     add_reaction,
     remove_reaction,
+    get_custom_profile_fields,
     get_user_info,
     get_message_by_id,
     verify_message,

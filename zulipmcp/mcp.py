@@ -726,7 +726,11 @@ def add_reaction(message_id: int, emoji_name: str) -> str:
 
 @mcp.tool()
 def get_user_info(email: str) -> str:
-    """Get information about a Zulip user.
+    """Get information about a Zulip user, including their full profile.
+
+    Returns all available profile data including custom fields like
+    phone number, pronouns, GitHub username, etc. Use this tool to look
+    up someone's phone number.
 
     Args:
         email: The user's email address.
@@ -734,15 +738,29 @@ def get_user_info(email: str) -> str:
     user = zulip_core.get_user_info(email)
     if not user:
         return f"User not found: {email}"
+
+    role_map = {100: "Owner", 200: "Admin", 300: "Moderator", 400: "Member", 600: "Guest"}
     lines = [
         f"User: {user.get('full_name', 'Unknown')}",
         f"Email: {user.get('email', email)}",
         f"User ID: {user.get('user_id', 'Unknown')}",
-        f"Role: {user.get('role', 'Unknown')}",
+        f"Role: {role_map.get(user.get('role'), user.get('role', 'Unknown'))}",
         f"Active: {user.get('is_active', 'Unknown')}",
     ]
     if user.get("timezone"):
         lines.append(f"Timezone: {user['timezone']}")
+
+    # Custom profile fields (phone number, pronouns, etc.)
+    profile_data = user.get("profile_data")
+    if profile_data:
+        field_defs = zulip_core.get_custom_profile_fields()
+        field_names = {str(f["id"]): f["name"] for f in field_defs}
+        for field_id, field_info in profile_data.items():
+            value = field_info.get("value")
+            if value:
+                name = field_names.get(field_id, f"Field {field_id}")
+                lines.append(f"{name}: {value}")
+
     return "\n".join(lines)
 
 

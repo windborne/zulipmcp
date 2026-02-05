@@ -695,9 +695,27 @@ def remove_reaction(message_id: int, emoji_name: str) -> dict:
     })
 
 
+def get_custom_profile_fields() -> list[dict]:
+    """Get the org's custom profile field definitions. Cached aggressively."""
+    cache_key = ("custom_profile_fields",)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = get_client().call_endpoint(url="/realm/profile_fields", method="GET")
+    if result.get("result") != "success":
+        return []
+    fields = result.get("custom_fields", [])
+    _cache.set(cache_key, fields, expire=3600)
+    return fields
+
+
 def get_user_info(email: str) -> Optional[dict]:
-    """Get user info by email. Returns user dict or None."""
-    result = get_client().call_endpoint(url=f"/users/{email}", method="GET")
+    """Get user info by email, including custom profile fields. Returns user dict or None."""
+    result = get_client().call_endpoint(
+        url=f"/users/{email}",
+        method="GET",
+        request={"include_custom_profile_fields": True},
+    )
     if result.get("result") != "success":
         return None
     return result["user"]
