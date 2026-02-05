@@ -474,6 +474,14 @@ def get_message_by_id(message_id: int) -> str:
 def get_message_link(message_id: int) -> str:
     """Get a permalink for a Zulip message.
 
+    IMPORTANT: Always use this tool to generate Zulip message links. Never
+    construct Zulip URLs manually. The URL format requires looking up stream IDs
+    and uses special encoding (e.g. spaces become .20) that is easy to get wrong.
+    Manually constructed links will be broken or link to the wrong place.
+
+    Returns a markdown link like [#stream > topic](url) where the URL shows the
+    full conversation context with the specific message focused.
+
     Args:
         message_id: The message ID.
     """
