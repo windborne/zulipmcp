@@ -756,20 +756,46 @@ def verify_message(message_id: int) -> str:
 def get_message_link(message_id: int) -> str:
     """Return a Zulip markdown link to a message: [#stream > topic](url).
 
-    Falls back to a bare URL if the message can't be fetched.
+    The URL links to the full conversation context with the specific message
+    focused, using the format:
+        {base}/#narrow/channel/{stream_id}-{stream_name}/topic/{topic}/with/{message_id}
+
+    Falls back to a simpler URL format if stream_id lookup fails.
     """
+    import urllib.parse
+
     client = get_client()
     base = client.base_url.rstrip("/")
     if base.endswith("/api"):
         base = base[:-4]
-    url = f"{base}/#narrow/id/{message_id}"
 
     msg = get_message_by_id(message_id)
-    if msg:
-        stream = msg.get("display_recipient", "")
-        topic = msg.get("subject", "")
-        return f"[#{stream} > {topic}]({url})"
-    return f"[message]({url})"
+    if not msg:
+        # Fallback: can't fetch message, just link by ID
+        url = f"{base}/#narrow/id/{message_id}"
+        return f"[message]({url})"
+
+    stream = msg.get("display_recipient", "")
+    topic = msg.get("subject", "")
+
+    # Try to get stream_id for the full context URL
+    stream_id = None
+    try:
+        result = client.get_stream_id(stream)
+        if result.get("result") == "success":
+            stream_id = result["stream_id"]
+    except Exception:
+        pass
+
+    if stream_id:
+        # Zulip URL-encodes topics with . notation (space -> .20, etc)
+        topic_encoded = urllib.parse.quote(topic, safe="").replace("%", ".")
+        url = f"{base}/#narrow/channel/{stream_id}-{stream}/topic/{topic_encoded}/with/{message_id}"
+    else:
+        # Fallback if we can't get stream_id
+        url = f"{base}/#narrow/id/{message_id}"
+
+    return f"[#{stream} > {topic}]({url})"
 
 
 def get_subscribed_streams() -> list[dict]:
