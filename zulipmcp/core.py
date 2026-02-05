@@ -217,6 +217,34 @@ def _html_to_text(html: str) -> str:
     return parser.get_text()
 
 
+# ============================================================================
+# Bot visibility filtering — /nobots support
+# ============================================================================
+
+def _should_hide_from_bot(msg: dict) -> bool:
+    """Check if a message should be hidden from bots.
+
+    Returns True if:
+    - The topic contains '/nobots' (case-insensitive)
+    - The message content starts with '/nobots' (case-insensitive, after stripping)
+    """
+    topic = msg.get("subject", "")
+    if "/nobots" in topic.lower():
+        return True
+    content = _html_to_text(msg.get("content", "")).strip()
+    if content.lower().startswith("/nobots"):
+        return True
+    return False
+
+
+def filter_for_bot(messages: list[dict]) -> list[dict]:
+    """Filter out messages that should be hidden from bots.
+
+    Use this before displaying messages to the bot or checking if new messages exist.
+    """
+    return [m for m in messages if not _should_hide_from_bot(m)]
+
+
 def _format_timestamp(timestamp: int, prev_timestamp: Optional[int] = None) -> str:
     """Smart timestamp formatting.
 
@@ -369,7 +397,15 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     combine=True merges consecutive messages from same user within 2 min.
     Smart timestamps: date shown only when it changes, time shown on 5+ min gaps.
     include_topic=True adds stream and topic attributes to each <msg> tag.
+
+    Note: Messages in /nobots topics or starting with /nobots are automatically
+    filtered out and will not be shown to the bot.
     """
+    if not messages:
+        return ""
+
+    # Filter out messages that should be hidden from bots
+    messages = filter_for_bot(messages)
     if not messages:
         return ""
 
@@ -574,7 +610,10 @@ def list_streams(include_private: bool = False) -> list[dict]:
 
 
 def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
-    """Get recent topics in a stream. Returns list of topic dicts."""
+    """Get recent topics in a stream. Returns list of topic dicts.
+
+    Note: Topics containing '/nobots' are filtered out and will not be shown to bots.
+    """
     client = get_client()
     result = client.get_stream_id(stream)
     if result["result"] != "success":
@@ -582,7 +621,10 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
     result = client.get_stream_topics(result["stream_id"])
     if result["result"] != "success":
         raise ValueError(f"Error fetching topics: {result.get('msg', '')}")
-    return result.get("topics", [])[:limit]
+    topics = result.get("topics", [])
+    # Filter out /nobots topics
+    topics = [t for t in topics if "/nobots" not in t.get("name", "").lower()]
+    return topics[:limit]
 
 
 def get_topic_messages(stream: str, topic: str, num_messages: int = 20,

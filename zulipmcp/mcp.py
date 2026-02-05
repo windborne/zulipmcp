@@ -7,6 +7,11 @@ registration and session state.
 Usage:
     python -m zulipmcp.mcp                  # stdio (Claude Code)
     python -m zulipmcp.mcp --transport sse  # SSE
+
+Bot visibility filtering:
+    - Topics containing '/nobots' are hidden from the bot (not shown in topic lists or messages)
+    - Messages starting with '/nobots' are hidden from the bot
+    This allows humans to have private conversations that the bot won't see or respond to.
 """
 
 import time
@@ -200,6 +205,9 @@ def reply(content: str) -> str:
 async def listen(timeout_hours: float, ctx: Context) -> str:
     """Wait for new messages in the current context (blocking).
 
+    Note: Messages in /nobots topics or starting with /nobots are automatically
+    filtered and will not trigger a return from this function.
+
     Args:
         timeout_hours: Max wait time in hours. Default to 1.
     """
@@ -242,10 +250,16 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                 _logger.error(f"[{listen_id}] iter={iteration} fetch_new_messages EXCEPTION: {type(e).__name__}: {e}")
                 raise
 
+            # Update last_seen_id from raw messages (before filtering) so we don't
+            # re-fetch hidden messages on the next poll
             if messages:
                 _session.last_seen_message_id = messages[-1]["id"]
-                _logger.info(f"[{listen_id}] iter={iteration} GOT {len(messages)} messages, returning")
-                return "New messages:\n\n" + zulip_core.format_messages(messages)
+
+            # Filter out /nobots messages before checking if we have anything to show
+            visible_messages = zulip_core.filter_for_bot(messages)
+            if visible_messages:
+                _logger.info(f"[{listen_id}] iter={iteration} GOT {len(visible_messages)} visible messages (of {len(messages)} total), returning")
+                return "New messages:\n\n" + zulip_core.format_messages(visible_messages)
 
             now = time.time()
             if now - last_heartbeat >= 10:
