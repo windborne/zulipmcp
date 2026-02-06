@@ -35,14 +35,14 @@ _log_dir.mkdir(parents=True, exist_ok=True)
 _log_file = _log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(_log_file),
-        logging.StreamHandler(),  # also stderr for immediate visibility
-    ]
 )
 _logger = logging.getLogger("zulipmcp")
+_logger.setLevel(logging.DEBUG)
+_file_handler = logging.FileHandler(_log_file)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+_logger.addHandler(_file_handler)
 _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={_log_file}")
 from fastmcp.server.context import Context
 
