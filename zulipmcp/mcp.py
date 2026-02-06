@@ -984,7 +984,7 @@ def stop_typing() -> str:
     """Stop the typing indicator in the current conversation.
     Call this when you've finished working but aren't about to send a message
     (e.g. before listen(), or if you decided not to reply after all).
-    Note: sending a message (reply/post_message) implicitly clears typing
+    Note: sending a message (reply/send_message) implicitly clears typing
     on the client side, so you don't need this before reply().
 
     Returns:

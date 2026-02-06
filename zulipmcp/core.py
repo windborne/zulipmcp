@@ -1,7 +1,6 @@
 import os
 import time
 import tempfile
-from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -89,136 +88,6 @@ def resolve_name(query: str) -> list[dict]:
     return matches
 
 
-class _ZulipHTMLParser(HTMLParser):
-    """Converts Zulip HTML to clean plaintext via tree walk.
-
-    Handles the common cases cleanly (paragraphs, line breaks, links, code,
-    blockquotes, spoilers, lists, images). Anything exotic passes through as-is.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._parts: list[str] = []
-        self._stack: list[str] = []  # tag stack
-        self._attrs_stack: list[dict] = []
-        self._suppress = False  # inside a tag whose text we skip
-
-    def _in(self, cls_name: str) -> bool:
-        """Check if we're inside a div with the given class."""
-        return any(a.get("class", "") and cls_name in a.get("class", "")
-                   for a in self._attrs_stack)
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        self._stack.append(tag)
-        self._attrs_stack.append(a)
-
-        if tag == "br":
-            self._parts.append("\n")
-            self._stack.pop()
-            self._attrs_stack.pop()
-        elif tag == "p":
-            if not self._in("spoiler-header"):
-                if self._parts and not self._parts[-1].endswith("\n\n"):
-                    self._parts.append("\n\n")
-        elif tag == "blockquote":
-            self._parts.append("\n<BLOCKQUOTE>")
-        elif tag == "code":
-            # Check if inside a <pre> (code block) or standalone (inline)
-            if "pre" in self._stack[:-1]:
-                self._parts.append("\n```\n")
-            else:
-                self._parts.append("`")
-        elif tag == "li":
-            self._parts.append("\n- ")
-        elif tag == "img":
-            src = a.get("src", "")
-            if src:
-                self._parts.append(f"[image: {src}]")
-            self._stack.pop()
-            self._attrs_stack.pop()
-        elif tag == "div":
-            cls = a.get("class", "")
-            if "spoiler-header" in cls:
-                self._parts.append("\n<spoiler title=\"")
-            elif "spoiler-content" in cls:
-                self._parts.append("\n")
-        elif tag == "span":
-            cls = a.get("class", "")
-            if "katex" in cls:
-                self._suppress = True
-        elif tag == "annotation":
-            # Inside katex — this has the raw TeX
-            if a.get("encoding") == "application/x-tex":
-                self._suppress = False
-                self._parts.append("$")
-
-    def handle_endtag(self, tag):
-        if tag == "br" or tag == "img":
-            return
-
-        if tag == "blockquote":
-            self._parts.append("</BLOCKQUOTE>\n")
-        elif tag == "code":
-            if "pre" in self._stack[:-1]:
-                self._parts.append("\n```\n")
-            else:
-                self._parts.append("`")
-        elif tag == "a":
-            pass  # link text emitted by handle_data
-        elif tag == "div":
-            a = self._attrs_stack[-1] if self._attrs_stack else {}
-            cls = a.get("class", "")
-            if "spoiler-header" in cls:
-                self._parts.append("\">\n")
-            elif "spoiler-block" in cls:
-                self._parts.append("\n</spoiler>\n")
-        elif tag == "annotation":
-            self._parts.append("$")
-            self._suppress = True  # suppress rest of katex
-        elif tag == "span":
-            a = self._attrs_stack[-1] if self._attrs_stack else {}
-            if "katex" in a.get("class", ""):
-                self._suppress = False
-
-        if self._stack and self._stack[-1] == tag:
-            self._stack.pop()
-            self._attrs_stack.pop()
-
-    def handle_data(self, data):
-        if self._suppress:
-            return
-        if self._in("spoiler-header"):
-            data = data.strip()
-            if not data:
-                return
-        self._parts.append(data)
-
-    def get_text(self) -> str:
-        text = "".join(self._parts)
-        # Process blockquotes (we used markers to avoid nesting issues)
-        while "<BLOCKQUOTE>" in text:
-            def _quote_block(segment):
-                lines = segment.split("\n")
-                return "\n".join(f"> {l}" if l else ">" for l in lines)
-            start = text.index("<BLOCKQUOTE>")
-            end = text.index("</BLOCKQUOTE>", start)
-            inner = text[start + len("<BLOCKQUOTE>"):end]
-            quoted = _quote_block(inner.strip())
-            text = text[:start] + "\n" + quoted + "\n" + text[end + len("</BLOCKQUOTE>"):]
-        # Collapse excess newlines
-        while "\n\n\n" in text:
-            text = text.replace("\n\n\n", "\n\n")
-        return text.strip()
-
-
-def _html_to_text(html: str) -> str:
-    """Convert Zulip HTML content to clean plaintext."""
-    parser = _ZulipHTMLParser()
-    parser.feed(html)
-    return parser.get_text()
-
-
 # ============================================================================
 # Bot visibility filtering — /nobots support
 # ============================================================================
@@ -233,7 +102,7 @@ def _should_hide_from_bot(msg: dict) -> bool:
     topic = msg.get("subject", "")
     if "/nobots" in topic.lower():
         return True
-    content = _html_to_text(msg.get("content", "")).strip()
+    content = msg.get("content", "").strip()
     if content.lower().startswith("/nobots"):
         return True
     return False
@@ -357,6 +226,7 @@ def _paginated_fetch(client: zulip.Client, narrow: list[dict],
             "num_before": 500,
             "num_after": 0,
             "narrow": narrow,
+            "apply_markdown": False,
         })
         if result["result"] != "success":
             break
@@ -419,7 +289,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     for msg in messages:
         sender = msg.get("sender_full_name", "Unknown")
         msg_id = msg.get("id", "")
-        content = _html_to_text(msg.get("content", ""))
+        content = msg.get("content", "")
         timestamp = msg.get("timestamp", 0)
 
         # Build the time attribute
@@ -645,6 +515,7 @@ def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
         "anchor": before_message_id or "newest",
         "num_before": min(num_messages, 100),
         "num_after": 0,
+        "apply_markdown": False,
     })
     if result["result"] != "success":
         return []
@@ -665,6 +536,7 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
         "num_before": 0,
         "num_after": 100,
         "include_anchor": False,
+        "apply_markdown": False,
     })
     if result["result"] != "success":
         return []
@@ -823,6 +695,7 @@ def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
         "num_before": 0,
         "num_after": 0,
         "include_anchor": True,
+        "apply_markdown": False,
     })
     if result.get("result") != "success" or not result.get("messages"):
         return None
@@ -893,8 +766,8 @@ def verify_message(message_id: int) -> str:
     stream = msg.get("display_recipient", "Unknown") if msg.get("type") == "stream" else "DM"
     topic = msg.get("subject", "Unknown") if msg.get("type") == "stream" else "N/A"
 
-    # Convert HTML to plaintext, then strip # and @ so delimiters can't be forged
-    content = _html_to_text(msg.get("content", ""))
+    # Strip # and @ so delimiters can't be forged in content
+    content = msg.get("content", "")
     content = content.replace("#", "").replace("@", "")
 
     return (
