@@ -1,3 +1,4 @@
+import os
 import time
 import tempfile
 from html.parser import HTMLParser
@@ -12,7 +13,8 @@ import zulip
 TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 _client: Optional[zulip.Client] = None
-_cache = diskcache.Cache(Path(__file__).parent.parent / ".cache")
+_cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
+    Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 
 
@@ -431,6 +433,11 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'topic="{msg.get("subject", "")}"')
         attrs.append(f'id="{msg_id}"')
 
+        # Append reaction summary if present
+        reaction_str = summarize_reactions(msg.get("reactions", []))
+        if reaction_str:
+            content += f"\n[reactions: {reaction_str}]"
+
         tag_open = "<msg " + " ".join(attrs) + ">"
         lines.append(f"{tag_open}\n{content}\n</msg>")
 
@@ -693,6 +700,140 @@ def remove_reaction(message_id: int, emoji_name: str) -> dict:
         "emoji_name": emoji_name,
         "reaction_type": "realm_emoji",
     })
+
+
+def edit_message(message_id: int, content: str) -> dict:
+    """Edit a message's content. Returns API result dict."""
+    return get_client().update_message({
+        "message_id": message_id,
+        "content": content,
+    })
+
+
+def send_dm(user_email: str, content: str) -> dict:
+    """Send a direct message to a user. Returns API result dict with 'id' on success."""
+    return get_client().send_message({
+        "type": "direct",
+        "to": [user_email],
+        "content": content,
+    })
+
+
+def send_typing(stream: str, topic: str, op: str = "start") -> dict:
+    """Send a typing indicator start/stop to a stream/topic.
+
+    Args:
+        stream: Stream name.
+        topic: Topic name.
+        op: "start" or "stop".
+
+    Returns API result dict.
+    """
+    client = get_client()
+    stream_result = client.get_stream_id(stream)
+    if stream_result["result"] != "success":
+        return stream_result
+    return client.call_endpoint(
+        url="/typing",
+        method="POST",
+        request={
+            "op": op,
+            "type": "stream",
+            "stream_id": stream_result["stream_id"],
+            "topic": topic,
+        },
+    )
+
+
+def list_emoji(query: str = "") -> tuple[list[str], int]:
+    """List custom emoji, optionally filtered by substring.
+
+    Returns (matching_names, total_count).
+    """
+    client = get_client()
+    result = client.get_realm_emoji()
+    if result.get("result") != "success":
+        return [], 0
+    all_emoji = sorted(
+        info["name"]
+        for info in result.get("emoji", {}).values()
+        if not info.get("deactivated", False)
+    )
+    total = len(all_emoji)
+    if query:
+        q = query.lower()
+        return [name for name in all_emoji if q in name.lower()], total
+    return all_emoji, total
+
+
+def get_emoji_count() -> int:
+    """Return count of active custom emoji. Returns 0 on error."""
+    try:
+        result = get_client().get_realm_emoji()
+        if result.get("result") != "success":
+            return 0
+        return sum(
+            1 for info in result.get("emoji", {}).values()
+            if not info.get("deactivated", False)
+        )
+    except Exception:
+        return 0
+
+
+def summarize_reactions(reactions: list) -> str:
+    """Summarize a list of Zulip reaction dicts into a compact string.
+
+    Returns e.g. ":thumbs_up: x2  :check:" or empty string if none.
+    """
+    counts: dict[str, int] = {}
+    for r in reactions:
+        name = r.get("emoji_name", "")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return ""
+    return "  ".join(
+        f":{name}: x{n}" if n > 1 else f":{name}:"
+        for name, n in counts.items()
+    )
+
+
+def check_reactions_on(message_id: int) -> str:
+    """Fetch a single message by ID and return its reaction summary, or empty string."""
+    try:
+        result = get_client().call_endpoint(
+            url=f"/messages/{message_id}",
+            method="GET",
+        )
+        if result.get("result") != "success":
+            return ""
+        msg = result.get("message", {})
+        reaction_str = summarize_reactions(msg.get("reactions", []))
+        if not reaction_str:
+            return ""
+        return f"Reactions on message {message_id}: {reaction_str}"
+    except Exception:
+        return ""
+
+
+def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
+    """Look up a message by ID and return its (stream, topic), or None for DMs/errors."""
+    result = get_client().get_messages({
+        "anchor": message_id,
+        "num_before": 0,
+        "num_after": 0,
+        "include_anchor": True,
+    })
+    if result.get("result") != "success" or not result.get("messages"):
+        return None
+    target = result["messages"][0]
+    if target.get("type") != "stream":
+        return None
+    stream = target.get("display_recipient", "")
+    topic = target.get("subject", "")
+    if not stream or not topic:
+        return None
+    return stream, topic
 
 
 def get_custom_profile_fields() -> list[dict]:

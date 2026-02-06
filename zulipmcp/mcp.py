@@ -57,8 +57,9 @@ mcp = FastMCP("Zulip Messaging")
 
 _hooks: dict = {
     "message_prefix": None,   # () -> str : prepended to reply() and send_message()
-    "on_session_end": None,   # () -> None : called when end_session() runs
+    "on_session_end": None,   # (session_state) -> None : called when end_session() runs
     "on_set_context": None,   # (stream, topic) -> str : extra text appended to set_context response
+    "on_reply": None,         # (sent_message_id, content) -> None : called after reply()
 }
 
 
@@ -69,12 +70,15 @@ def configure(**kwargs):
         message_prefix: callable() -> str
             Returns a prefix string prepended to all outgoing messages
             (reply and send_message). Return "" to skip.
-        on_session_end: callable() -> None
-            Called when end_session() is invoked. Use for cleanup
-            (e.g. writing exit markers).
+        on_session_end: callable(session_state) -> None
+            Called when end_session()/sign_off() is invoked. Receives the
+            SessionState object. Use for cleanup (e.g. writing exit markers).
+            For backwards compatibility, also accepts () -> None.
         on_set_context: callable(stream: str, topic: str) -> str
             Returns extra text to append to the set_context response
             (e.g. custom instructions, prompts).
+        on_reply: callable(sent_message_id: int, content: str) -> None
+            Called after a reply is successfully sent.
     """
     for key, value in kwargs.items():
         if key not in _hooks:
@@ -99,7 +103,9 @@ class SessionState:
     stream: Optional[str] = None
     topic: Optional[str] = None
     last_seen_message_id: Optional[int] = None
+    last_sent_message_id: Optional[int] = None
     my_user_id: Optional[int] = None
+    user_email: Optional[str] = None
     active: bool = False
     started_at: Optional[float] = None
 
@@ -107,6 +113,8 @@ class SessionState:
         self.stream = None
         self.topic = None
         self.last_seen_message_id = None
+        self.last_sent_message_id = None
+        self.user_email = None
         self.active = False
         self.started_at = None
 
@@ -119,12 +127,17 @@ _session = SessionState()
 # ============================================================================
 
 @mcp.tool()
-def set_context(stream: str, topic: str) -> str:
-    """Set the session context for a conversation. Call once at the start.
+def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
+    """Initialize the session context for a conversation.
+    Call this once at the start of a session to set where you're chatting.
 
     Args:
-        stream: Stream/channel name.
-        topic: Topic name within the stream.
+        stream: The name of the Zulip stream/channel.
+        topic: The topic name within the stream.
+        num_messages: Number of recent messages to fetch for context (default 20).
+
+    Returns:
+        Confirmation with recent message history to get you up to speed.
     """
     _logger.info(f"set_context() called: stream={stream}, topic={topic}")
 
@@ -135,13 +148,28 @@ def set_context(stream: str, topic: str) -> str:
 
     _session.stream = stream
     _session.topic = topic
+    _session.user_email = os.environ.get("SESSION_USER_EMAIL", "")
     _session.active = True
     _session.started_at = time.time()
 
-    messages = zulip_core.get_topic_messages(stream, topic, num_messages=20)
+    messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages)
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
         _logger.debug(f"set_context: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
+
+    # Start typing — agent is about to do work
+    try:
+        zulip_core.send_typing(stream, topic, "start")
+    except Exception:
+        pass
+
+    # Override with trigger message ID so first react() targets the @mention
+    trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
+    if trigger_msg_id:
+        try:
+            _session.last_seen_message_id = int(trigger_msg_id)
+        except (ValueError, TypeError):
+            pass
 
     header = f"Session context set to #{stream} > {topic}"
 
@@ -155,9 +183,33 @@ def set_context(stream: str, topic: str) -> str:
         except Exception:
             pass
 
-    header += "\n\nRecent messages:"
+    msg_count = len(messages)
+    header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
+    output = header + "\n" + zulip_core.format_messages(messages, include_topic=False)
+
+    footer = "\n--- END CONVERSATION HISTORY ---"
+    if msg_count >= num_messages:
+        footer += "\nThere may be older messages not shown. Use get_messages(message_id=...) to see further back."
+    output += footer
+
+    # Trigger message ID info
+    if trigger_msg_id:
+        try:
+            output += f"\n\nTrigger message ID: {int(trigger_msg_id)}"
+        except (ValueError, TypeError):
+            pass
+
+    # Custom emoji count
+    emoji_count = zulip_core.get_emoji_count()
+    if emoji_count:
+        output += (
+            f"\n\n---\n{emoji_count} custom emoji available on this server. "
+            "Use `list_emoji(query)` to search by name. "
+            "You can also see which custom emoji people use via reactions on messages above."
+        )
+
     _logger.info(f"set_context() completed successfully")
-    return header + "\n\n" + zulip_core.format_messages(messages, include_topic=False)
+    return output
 
 
 @mcp.tool()
@@ -165,7 +217,10 @@ def reply(content: str) -> str:
     """Reply in the current session context.
 
     Args:
-        content: Message content (supports Zulip markdown).
+        content: The message content (supports Zulip markdown).
+
+    Returns:
+        Confirmation with the sent message ID.
     """
     _logger.info(f"reply() called: content_len={len(content)}")
 
@@ -191,20 +246,42 @@ def reply(content: str) -> str:
 
     sent_id = result.get("id")
     _session.last_seen_message_id = sent_id
+    _session.last_sent_message_id = sent_id
     response = f"Message sent (id: {sent_id})"
     _logger.info(f"reply() sent message id={sent_id}")
 
-    if missed:
-        _session.last_seen_message_id = missed[-1]["id"]
-        response += "\n\nMissed messages:\n\n" + zulip_core.format_messages(missed)
+    # Fire on_reply hook
+    on_reply = _hooks.get("on_reply")
+    if on_reply:
+        try:
+            on_reply(sent_id, content)
+        except Exception as e:
+            _logger.warning(f"reply() on_reply hook failed: {e}")
 
-    response += "\n\n[Hint: Use `listen` tool if you need to wait for a reply.]"
+    # Re-start typing — agent is about to do more work (tool calls, thinking).
+    # A listen() right after will cancel it.
+    try:
+        zulip_core.send_typing(_session.stream, _session.topic, "start")
+    except Exception:
+        pass
+
+    if missed:
+        _session.last_seen_message_id = max(sent_id, missed[-1]["id"])
+        response += (
+            "\n\nNOTE: These messages arrived while you were working — "
+            "address them in your next reply:\n\n"
+            + zulip_core.format_messages(missed)
+        )
+
     return response
 
 
 @mcp.tool()
 async def listen(timeout_hours: float, ctx: Context) -> str:
-    """Wait for new messages in the current context (blocking).
+    """Wait for new messages in the current conversation (blocking).
+
+    Blocks until a new message arrives or the timeout expires.
+    Default to 1 hour. Use longer timeouts for follow-up waits.
 
     Note: Messages in /nobots topics or starting with /nobots are automatically
     filtered and will not trigger a return from this function.
@@ -218,6 +295,12 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     if not _session.active or not _session.stream or not _session.topic:
         _logger.warning(f"[{listen_id}] No session context set")
         return "Error: No session context set. Call set_context first."
+
+    # Auto-stop typing — agent is just waiting, not working.
+    try:
+        zulip_core.send_typing(_session.stream, _session.topic, "stop")
+    except Exception:
+        pass
 
     timeout_seconds = timeout_hours * 3600
 
@@ -260,7 +343,20 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             visible_messages = zulip_core.filter_for_bot(messages)
             if visible_messages:
                 _logger.info(f"[{listen_id}] iter={iteration} GOT {len(visible_messages)} visible messages (of {len(messages)} total), returning")
-                return "New messages:\n\n" + zulip_core.format_messages(visible_messages)
+
+                # Check for reactions on recent messages before returning
+                reaction_lines = []
+                for check_id in dict.fromkeys([listen_msg_id, _session.last_sent_message_id]):
+                    if check_id:
+                        line = zulip_core.check_reactions_on(check_id)
+                        if line:
+                            reaction_lines.append(line)
+
+                output = ""
+                if reaction_lines:
+                    output += "\n".join(reaction_lines) + "\n\n"
+                output += "New messages:\n\n" + zulip_core.format_messages(visible_messages)
+                return output
 
             now = time.time()
             if now - last_heartbeat >= 10:
@@ -289,7 +385,8 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
         _logger.info(f"[{listen_id}] TIMEOUT after {timeout_hours} hours, iter={iteration}")
         return (
             f"Timeout: No new messages after {timeout_hours} hours.\n\n"
-            "[Hint: Send a check-in message, then wait again with exponential backoff.]"
+            "If the task seems done, write a session summary and end_session(). "
+            "Otherwise, send a contextual check-in and listen again."
         )
     except Exception as e:
         _logger.error(f"[{listen_id}] UNHANDLED EXCEPTION in listen loop: {type(e).__name__}: {e}", exc_info=True)
@@ -342,6 +439,12 @@ async def listen_and_babysit(
     if not workers:
         _logger.warning(f"[{listen_id}] No workers specified")
         return "Error: No workers specified. Provide at least one worker spec."
+
+    # Auto-stop typing — agent is just waiting, not working.
+    try:
+        zulip_core.send_typing(_session.stream, _session.topic, "stop")
+    except Exception:
+        pass
 
     timeout_seconds = timeout_hours * 3600
     listen_msg_id = _session.last_seen_message_id
@@ -465,25 +568,73 @@ async def listen_and_babysit(
                 _logger.warning(f"[{listen_id}] Failed to remove reaction: {e}")
 
 
-@mcp.tool()
-def end_session() -> str:
-    """End the current session gracefully (without farewell message).
+def _write_exit_markers():
+    """Write clean exit markers to workspace if WORKSPACE_PATH is set."""
+    workspace = os.environ.get("WORKSPACE_PATH")
+    if workspace:
+        try:
+            Path(workspace).joinpath(".clean_exit").write_text(str(time.time()))
+            if _session.last_sent_message_id:
+                Path(workspace).joinpath(".last_sent_message_id").write_text(
+                    str(_session.last_sent_message_id))
+        except Exception:
+            pass
 
-    Prefer sign_off() instead, which posts a farewell and then ends the session.
-    """
-    _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}")
 
-    if not _session.active:
-        _logger.warning("end_session() called with no active session")
-        return "No active session to end."
-    info = f"Session ended. Was chatting in #{_session.stream} > {_session.topic}"
-
+def _fire_session_end_hook():
+    """Fire the on_session_end hook with backwards-compat fallback."""
     on_end = _hooks.get("on_session_end")
     if on_end:
         try:
-            on_end()
+            on_end(_session)
+        except TypeError:
+            # Backwards compat: old no-arg hooks
+            try:
+                on_end()
+            except Exception as e:
+                _logger.warning(f"on_session_end hook failed: {e}")
         except Exception as e:
-            _logger.warning(f"end_session() on_end hook failed: {e}")
+            _logger.warning(f"on_session_end hook failed: {e}")
+
+
+def _stop_typing_safe():
+    """Stop typing indicator, ignoring errors."""
+    if _session.active and _session.stream and _session.topic:
+        try:
+            zulip_core.send_typing(_session.stream, _session.topic, "stop")
+        except Exception:
+            pass
+
+
+def _cleanup_session():
+    """Common cleanup for end_session and sign_off: markers, typing, hook."""
+    _write_exit_markers()
+    _stop_typing_safe()
+    _fire_session_end_hook()
+
+
+@mcp.tool()
+def end_session() -> str:
+    """End the current session gracefully.
+    Writes a clean exit marker so the listener knows this was intentional.
+
+    Returns:
+        Confirmation that the session has ended.
+    """
+    _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}")
+
+    # Write exit markers before anything else — even if session isn't active,
+    # DM sessions may never call set_context() but still need the marker.
+    _write_exit_markers()
+
+    if not _session.active:
+        _logger.warning("end_session() called with no active session")
+        return "Session ended."
+
+    info = f"Session ended. Was chatting in #{_session.stream} > {_session.topic}"
+
+    _stop_typing_safe()
+    _fire_session_end_hook()
 
     _session.reset()
     _logger.info("end_session() completed")
@@ -529,7 +680,11 @@ def sign_off(message: str = "") -> str:
         _logger.error(f"sign_off() send_message failed: {result}")
         # Still end the session even if farewell fails
     else:
-        _logger.info(f"sign_off() posted farewell")
+        sent_id = result.get("id")
+        _session.last_sent_message_id = sent_id
+        _logger.info(f"sign_off() posted farewell id={sent_id}")
+
+    _cleanup_session()
 
     # End the session
     stream, topic = _session.stream, _session.topic
@@ -601,21 +756,49 @@ def get_stream_members(stream: str) -> str:
 
 
 @mcp.tool()
-def get_messages(stream: str, topic: str, num_messages: int = 20,
-                 before_message_id: Optional[int] = None) -> str:
-    """Get messages from a specific stream and topic.
+def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
+                 before_message_id: Optional[int] = None,
+                 message_id: Optional[int] = None) -> str:
+    """Get messages from a stream/topic, or fetch context around a message ID.
+
+    Accepts either stream+topic OR message_id:
+    - stream+topic: fetch messages from that topic (with optional pagination)
+    - message_id: auto-discover stream/topic, fetch context around that message
+    - Both: use stream/topic narrow with anchor at message_id
 
     Args:
-        stream: Stream/channel name.
-        topic: Topic name.
+        stream: Stream/channel name (optional if message_id given).
+        topic: Topic name (optional if message_id given).
         num_messages: Number of messages (default 20, max 100).
         before_message_id: Get messages before this ID (for pagination).
+        message_id: Fetch context around this message ID.
     """
-    messages = zulip_core.get_topic_messages(
-        stream, topic, num_messages=num_messages,
-        before_message_id=before_message_id,
-    )
+    # If message_id is given but no stream/topic, discover them
+    if message_id and (not stream or not topic):
+        ctx = zulip_core.discover_message_context(message_id)
+        if ctx is None:
+            return f"Message {message_id} not found or is not in a stream/topic context."
+        stream, topic = ctx
+
+    if not stream or not topic:
+        return "Error: Provide stream+topic or message_id."
+
+    # Fetch messages
+    if message_id and not before_message_id:
+        # Fetch context around the message
+        messages = zulip_core.get_topic_messages(
+            stream, topic, num_messages=num_messages,
+            before_message_id=message_id + 1,
+        )
+    else:
+        messages = zulip_core.get_topic_messages(
+            stream, topic, num_messages=num_messages,
+            before_message_id=before_message_id,
+        )
+
     header = f"Messages from #{stream} > {topic}:"
+    if message_id:
+        header = f"History for #{stream} > {topic} (around message {message_id}):"
     return header + "\n\n" + zulip_core.format_messages(messages)
 
 
@@ -718,6 +901,101 @@ def add_reaction(message_id: int, emoji_name: str) -> str:
     if result["result"] != "success":
         return f"Error adding reaction: {result.get('msg', 'Unknown error')}"
     return f"Added :{emoji_name}: to message {message_id}"
+
+
+@mcp.tool()
+def edit_message(message_id: int, content: str) -> str:
+    """Edit a message the bot previously sent.
+
+    Use this to update a previous reply in-place (e.g. progress updates,
+    correcting mistakes). Can only edit messages sent by the bot.
+
+    Args:
+        message_id: The ID of the message to edit (from reply confirmation).
+        content: The new message content.
+
+    Returns:
+        Confirmation or error message.
+    """
+    result = zulip_core.edit_message(message_id, content)
+    if result.get("result") != "success":
+        return f"Error editing message: {result.get('msg', 'Unknown error')}"
+    return f"Message {message_id} updated."
+
+
+@mcp.tool()
+def send_dm(user_email: str, content: str) -> str:
+    """Send a direct message to a user.
+
+    Args:
+        user_email: The email address of the recipient.
+        content: The message content (supports Zulip markdown).
+
+    Returns:
+        Confirmation with the sent message ID, or an error message.
+    """
+    prefix = _get_prefix()
+    result = zulip_core.send_dm(user_email, prefix + content)
+    if result.get("result") != "success":
+        return f"Error sending DM: {result.get('msg', 'Unknown error')}"
+    return f"DM sent to {user_email} (id: {result.get('id')})"
+
+
+@mcp.tool()
+def list_emoji(query: str = "") -> str:
+    """Search custom emoji available on this Zulip server.
+
+    Args:
+        query: Substring to filter emoji names (case-insensitive).
+               Empty string returns all custom emoji.
+
+    Returns:
+        Matching emoji names, or the full list if no query.
+    """
+    matches, total = zulip_core.list_emoji(query)
+    if query:
+        if not matches:
+            return f"No custom emoji matching '{query}'. {total} total available."
+        return f"{len(matches)} matching '{query}': {', '.join(matches)}"
+    return f"{total} custom emoji: {', '.join(matches)}"
+
+
+@mcp.tool()
+def typing() -> str:
+    """Send a typing indicator in the current conversation.
+    Call this before heavy tool work (code execution, searches, analysis)
+    to let users know you're working. Do NOT call before reply() or listen() —
+    only before stretches of work where you won't be posting for a while.
+    Typing indicator auto-clears when you send a message.
+
+    Returns:
+        Confirmation or error message.
+    """
+    if not _session.active or not _session.stream or not _session.topic:
+        return "Error: No session context set. Call set_context first."
+    result = zulip_core.send_typing(_session.stream, _session.topic, "start")
+    if result.get("result") != "success":
+        return f"Error sending typing indicator: {result.get('msg', 'Unknown error')}"
+    return "Typing indicator start."
+
+
+@mcp.tool()
+def stop_typing() -> str:
+    """Stop the typing indicator in the current conversation.
+    Call this when you've finished working but aren't about to send a message
+    (e.g. before listen(), or if you decided not to reply after all).
+    Note: sending a message (reply/post_message) implicitly clears typing
+    on the client side, so you don't need this before reply().
+
+    Returns:
+        Confirmation or error message.
+    """
+    if not _session.active or not _session.stream or not _session.topic:
+        return "Error: No session context set. Call set_context first."
+    result = zulip_core.send_typing(_session.stream, _session.topic, "stop")
+    if result.get("result") != "success":
+        return f"Error sending typing indicator: {result.get('msg', 'Unknown error')}"
+    return "Typing indicator stop."
 
 
 # ============================================================================
