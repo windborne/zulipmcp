@@ -736,11 +736,21 @@ def get_user_info(email: str) -> Optional[dict]:
 
 
 def get_message_by_id(message_id: int) -> Optional[dict]:
-    """Get a specific message by ID. Returns message dict or None."""
-    result = get_client().get_raw_message(message_id)
-    if result.get("result") != "success":
+    """Get a specific message by ID. Returns message dict or None.
+
+    Uses get_messages with apply_markdown=False so the content field contains
+    raw markdown (consistent with get_topic_messages), not rendered HTML.
+    """
+    result = get_client().get_messages({
+        "anchor": message_id,
+        "num_before": 0,
+        "num_after": 0,
+        "include_anchor": True,
+        "apply_markdown": False,
+    })
+    if result.get("result") != "success" or not result.get("messages"):
         return None
-    return result["message"]
+    return result["messages"][0]
 
 
 def verify_message(message_id: int) -> str:
