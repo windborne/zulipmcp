@@ -50,6 +50,15 @@ from . import core as zulip_core
 
 mcp = FastMCP("Zulip Messaging")
 
+PRIVATE_STREAM_ERROR = "Error: This stream is private. Use set_context/reply to interact with private streams you've been invited to."
+
+
+def _reject_if_private(stream: str) -> str | None:
+    """Return an error string if the stream is private, None otherwise."""
+    if zulip_core.is_stream_private(stream):
+        return PRIVATE_STREAM_ERROR
+    return None
+
 
 # ============================================================================
 # Hook system — allows callers to customize MCP behavior without forking
@@ -143,7 +152,8 @@ def set_context(stream: str, topic: str) -> str:
         _session.last_seen_message_id = messages[-1]["id"]
         _logger.debug(f"set_context: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
 
-    header = f"Session context set to #{stream} > {topic}"
+    visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
+    header = f"Session context set to {visibility} #{stream} > {topic}"
 
     # Allow hook to inject extra context (e.g. custom instructions)
     on_set_ctx = _hooks.get("on_set_context")
@@ -543,18 +553,15 @@ def sign_off(message: str = "") -> str:
 # ============================================================================
 
 @mcp.tool()
-def list_streams(include_private: bool = False) -> str:
-    """List all available Zulip streams/channels.
-
-    Args:
-        include_private: Include private streams the bot can access.
-    """
-    streams = zulip_core.list_streams(include_private=include_private)
+def list_streams() -> str:
+    """List all available Zulip streams/channels (public and private)."""
+    streams = zulip_core.list_streams(include_private=True)
     if not streams:
         return "No streams found."
     lines = []
     for s in streams:
-        line = f"- #{s['name']}"
+        visibility = "[private]" if s.get("invite_only", False) else "[public]"
+        line = f"- {visibility} #{s['name']}"
         if s.get("description"):
             line += f": {s['description']}"
         lines.append(line)
@@ -569,6 +576,9 @@ def get_stream_topics(stream: str, limit: int = 20) -> str:
         stream: Stream/channel name.
         limit: Max topics to return (default 20).
     """
+    err = _reject_if_private(stream)
+    if err:
+        return err
     try:
         topics = zulip_core.get_stream_topics(stream, limit=limit)
     except ValueError as e:
@@ -588,6 +598,9 @@ def get_stream_members(stream: str) -> str:
     Args:
         stream: Stream/channel name.
     """
+    err = _reject_if_private(stream)
+    if err:
+        return err
     try:
         members = zulip_core.get_stream_members(stream)
     except ValueError as e:
@@ -611,11 +624,14 @@ def get_messages(stream: str, topic: str, num_messages: int = 20,
         num_messages: Number of messages (default 20, max 100).
         before_message_id: Get messages before this ID (for pagination).
     """
+    err = _reject_if_private(stream)
+    if err:
+        return err
     messages = zulip_core.get_topic_messages(
         stream, topic, num_messages=num_messages,
         before_message_id=before_message_id,
     )
-    header = f"Messages from #{stream} > {topic}:"
+    header = f"Messages from [public] #{stream} > {topic}:"
     return header + "\n\n" + zulip_core.format_messages(messages)
 
 
@@ -629,6 +645,11 @@ def get_message_by_id(message_id: int) -> str:
     msg = zulip_core.get_message_by_id(message_id)
     if not msg:
         return f"Message {message_id} not found."
+    # Block messages from private streams
+    if msg.get("type") == "stream":
+        stream = msg.get("display_recipient", "")
+        if stream and zulip_core.is_stream_private(stream):
+            return PRIVATE_STREAM_ERROR
     return zulip_core.format_messages([msg], include_topic=True)
 
 
@@ -647,6 +668,11 @@ def get_message_link(message_id: int) -> str:
     Args:
         message_id: The message ID.
     """
+    msg = zulip_core.get_message_by_id(message_id)
+    if msg and msg.get("type") == "stream":
+        stream = msg.get("display_recipient", "")
+        if stream and zulip_core.is_stream_private(stream):
+            return PRIVATE_STREAM_ERROR
     return zulip_core.get_message_link(message_id)
 
 
@@ -683,6 +709,11 @@ def verify_message(message_id: int) -> str:
     Args:
         message_id: The ID of the message to verify.
     """
+    msg = zulip_core.get_message_by_id(message_id)
+    if msg and msg.get("type") == "stream":
+        stream = msg.get("display_recipient", "")
+        if stream and zulip_core.is_stream_private(stream):
+            return PRIVATE_STREAM_ERROR
     return zulip_core.verify_message(message_id)
 
 
@@ -699,6 +730,9 @@ def send_message(stream: str, topic: str, content: str) -> str:
         topic: Topic name.
         content: Message content (supports Zulip markdown).
     """
+    err = _reject_if_private(stream)
+    if err:
+        return err
     prefix = _get_prefix()
     result = zulip_core.send_message(stream, topic, prefix + content)
     if result["result"] != "success":
@@ -793,7 +827,8 @@ def get_subscribed_streams() -> str:
         return "Not subscribed to any streams."
     lines = [f"Subscribed to {len(subs)} streams:"]
     for s in subs:
-        lines.append(f"- #{s['name']}")
+        visibility = "[private]" if zulip_core.is_stream_private(s["name"]) else "[public]"
+        lines.append(f"- {visibility} #{s['name']}")
     return "\n".join(lines)
 
 

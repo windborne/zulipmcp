@@ -4,6 +4,7 @@ from .core import (
     get_client,
     get_user_email,
     resolve_name,
+    is_stream_private,
     get_messages,
     format_messages,
     format_topics,

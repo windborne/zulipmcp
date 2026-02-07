@@ -27,6 +27,27 @@ def get_ignored_streams() -> set[str]:
     return _ignored_streams
 
 
+def is_stream_private(stream_name: str) -> bool:
+    """Check if a stream is private (invite_only). Cached for 1 hour."""
+    cache_key = ("is_stream_private", stream_name.lower())
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Fetch all streams and cache every one — avoids repeated API calls
+    result = get_client().get_streams(include_public=True, include_subscribed=True)
+    if result["result"] != "success":
+        return False
+
+    for s in result.get("streams", []):
+        is_private = s.get("invite_only", False)
+        _cache.set(("is_stream_private", s["name"].lower()), is_private, expire=3600)
+
+    # Re-check cache after populating
+    cached = _cache.get(cache_key)
+    return cached if cached is not None else False
+
+
 def get_client() -> zulip.Client:
     """Get or create the Zulip client singleton.
 
@@ -427,7 +448,10 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         if time_attr:
             attrs.append(time_attr)
         if include_topic and msg.get("type") == "stream":
-            attrs.append(f'stream="{msg.get("display_recipient", "")}"')
+            stream_name = msg.get("display_recipient", "")
+            visibility = "private" if is_stream_private(stream_name) else "public"
+            attrs.append(f'stream="{stream_name}"')
+            attrs.append(f'visibility="{visibility}"')
             attrs.append(f'topic="{msg.get("subject", "")}"')
         attrs.append(f'id="{msg_id}"')
 
@@ -522,7 +546,8 @@ def format_topics(messages: list[dict], combine: bool = True) -> str:
 
     sections = []
     for (stream, topic), group_msgs in sorted_groups:
-        header = f"Stream: {stream}, Topic: {topic}"
+        visibility = "[private]" if is_stream_private(stream) else "[public]"
+        header = f"Stream: {visibility} {stream}, Topic: {topic}"
         body = format_messages(group_msgs, include_topic=False, combine=combine)
         sections.append(f"{header}\n{body}")
 
