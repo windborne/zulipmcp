@@ -55,6 +55,14 @@ While listening, a `robot_ear` emoji is added to the last message as a visual in
 
 When `reply` is called, it checks for new messages *before* sending. If anyone posted while the LLM was thinking, those messages are fetched and returned alongside the "message sent" confirmation. This way the LLM always sees what it missed and can react accordingly. The `last_seen_message_id` is updated to whichever is newest — the missed messages or the sent message — so nothing falls through the cracks.
 
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
+| `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
+| `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
+
 ## Style Notes
 
 Keep code in core.py elegant, short, and simple.

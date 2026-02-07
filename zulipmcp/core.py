@@ -303,10 +303,10 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'topic="{msg.get("subject", "")}"')
         attrs.append(f'id="{msg_id}"')
 
-        # Append reaction summary if present
+        # Add reaction summary as attribute if present
         reaction_str = summarize_reactions(msg.get("reactions", []))
         if reaction_str:
-            content += f"\n[reactions: {reaction_str}]"
+            attrs.append(f'reactions="{reaction_str}"')
 
         tag_open = "<msg " + " ".join(attrs) + ">"
         lines.append(f"{tag_open}\n{content}\n</msg>")
@@ -323,19 +323,22 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
 
     combined = []
     current = dict(messages[0])
+    current["reactions"] = list(current.get("reactions", []))
 
     for msg in messages[1:]:
         same_user = msg.get("sender_full_name") == current.get("sender_full_name")
         time_gap = msg.get("timestamp", 0) - current.get("time_range_end", current.get("timestamp", 0))
 
         if same_user and time_gap <= 120:
-            # Merge: append content, update end time and id
+            # Merge: append content, update end time, id, and reactions
             current["content"] = current["content"] + "\n\n" + msg.get("content", "")
             current["time_range_end"] = msg.get("timestamp", 0)
             current["id"] = msg.get("id", current["id"])
+            current["reactions"].extend(msg.get("reactions", []))
         else:
             combined.append(current)
             current = dict(msg)
+            current["reactions"] = list(current.get("reactions", []))
 
     combined.append(current)
     return combined
@@ -591,6 +594,9 @@ def send_dm(user_email: str, content: str) -> dict:
     })
 
 
+_stream_id_cache: dict[str, int] = {}
+
+
 def send_typing(stream: str, topic: str, op: str = "start") -> dict:
     """Send a typing indicator start/stop to a stream/topic.
 
@@ -602,16 +608,20 @@ def send_typing(stream: str, topic: str, op: str = "start") -> dict:
     Returns API result dict.
     """
     client = get_client()
-    stream_result = client.get_stream_id(stream)
-    if stream_result["result"] != "success":
-        return stream_result
+    stream_id = _stream_id_cache.get(stream)
+    if stream_id is None:
+        stream_result = client.get_stream_id(stream)
+        if stream_result["result"] != "success":
+            return stream_result
+        stream_id = stream_result["stream_id"]
+        _stream_id_cache[stream] = stream_id
     return client.call_endpoint(
         url="/typing",
         method="POST",
         request={
             "op": op,
             "type": "stream",
-            "stream_id": stream_result["stream_id"],
+            "stream_id": stream_id,
             "topic": topic,
         },
     )
