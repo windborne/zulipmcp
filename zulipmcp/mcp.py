@@ -741,6 +741,24 @@ def send_message(stream: str, topic: str, content: str) -> str:
 
 
 @mcp.tool()
+def send_direct_message(recipients: list[str], content: str) -> str:
+    """Send a direct message (DM) to one or more users.
+
+    Args:
+        recipients: List of email addresses to send to (e.g., ["user@example.com"]).
+        content: Message content (supports Zulip markdown).
+    """
+    if not recipients:
+        return "Error: No recipients specified."
+    prefix = _get_prefix()
+    result = zulip_core.send_direct_message(recipients, prefix + content)
+    if result["result"] != "success":
+        return f"Error sending DM: {result.get('msg', 'Unknown error')}"
+    recipient_str = ", ".join(recipients)
+    return f"DM sent to {recipient_str} (id: {result.get('id')})"
+
+
+@mcp.tool()
 def add_reaction(message_id: int, emoji_name: str) -> str:
     """Add an emoji reaction to a message.
 

@@ -703,6 +703,23 @@ def send_message(stream: str, topic: str, content: str) -> dict:
     })
 
 
+def send_direct_message(recipients: list[str], content: str) -> dict:
+    """Send a direct message (DM) to one or more users.
+
+    Args:
+        recipients: List of email addresses to send to.
+        content: Message content (supports Zulip markdown).
+
+    Returns:
+        API result dict with 'id' on success.
+    """
+    return get_client().send_message({
+        "type": "direct",
+        "to": recipients,
+        "content": content,
+    })
+
+
 def add_reaction(message_id: int, emoji_name: str) -> dict:
     """Add emoji reaction to a message. Returns API result dict."""
     return get_client().add_reaction({
