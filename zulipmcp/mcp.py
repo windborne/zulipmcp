@@ -50,12 +50,15 @@ from . import core as zulip_core
 
 mcp = FastMCP("Zulip Messaging")
 
-PRIVATE_STREAM_ERROR = "Error: This stream is private. Use set_context/reply to interact with private streams you've been invited to."
+PRIVATE_STREAM_ERROR = (
+    "Error: Private stream access denied for this session. "
+    "You can only access the private stream where you were pinged."
+)
 
 
 def _reject_if_private(stream: str) -> str | None:
     """Return an error string if the stream is private, None otherwise."""
-    if zulip_core.is_stream_private(stream):
+    if zulip_core.is_stream_private(stream) and not zulip_core.is_private_stream_allowed(stream):
         return PRIVATE_STREAM_ERROR
     return None
 
@@ -136,6 +139,10 @@ def set_context(stream: str, topic: str) -> str:
         topic: Topic name within the stream.
     """
     _logger.info(f"set_context() called: stream={stream}, topic={topic}")
+    err = _reject_if_private(stream)
+    if err:
+        _logger.warning(f"set_context() denied private stream access: stream={stream}")
+        return err
 
     profile = zulip_core.get_profile()
     if profile.get("result") == "success":
@@ -631,7 +638,8 @@ def get_messages(stream: str, topic: str, num_messages: int = 20,
         stream, topic, num_messages=num_messages,
         before_message_id=before_message_id,
     )
-    header = f"Messages from [public] #{stream} > {topic}:"
+    visibility = "private" if zulip_core.is_stream_private(stream) else "public"
+    header = f"Messages from [{visibility}] #{stream} > {topic}:"
     return header + "\n\n" + zulip_core.format_messages(messages)
 
 
@@ -644,11 +652,11 @@ def get_message_by_id(message_id: int) -> str:
     """
     msg = zulip_core.get_message_by_id(message_id)
     if not msg:
-        return f"Message {message_id} not found."
+        return f"Message {message_id} not found or not accessible."
     # Block messages from private streams
     if msg.get("type") == "stream":
         stream = msg.get("display_recipient", "")
-        if stream and zulip_core.is_stream_private(stream):
+        if stream and not zulip_core.is_private_stream_allowed(stream):
             return PRIVATE_STREAM_ERROR
     return zulip_core.format_messages([msg], include_topic=True)
 
@@ -671,7 +679,7 @@ def get_message_link(message_id: int) -> str:
     msg = zulip_core.get_message_by_id(message_id)
     if msg and msg.get("type") == "stream":
         stream = msg.get("display_recipient", "")
-        if stream and zulip_core.is_stream_private(stream):
+        if stream and not zulip_core.is_private_stream_allowed(stream):
             return PRIVATE_STREAM_ERROR
     return zulip_core.get_message_link(message_id)
 
@@ -712,7 +720,7 @@ def verify_message(message_id: int) -> str:
     msg = zulip_core.get_message_by_id(message_id)
     if msg and msg.get("type") == "stream":
         stream = msg.get("display_recipient", "")
-        if stream and zulip_core.is_stream_private(stream):
+        if stream and not zulip_core.is_private_stream_allowed(stream):
             return PRIVATE_STREAM_ERROR
     return zulip_core.verify_message(message_id)
 
