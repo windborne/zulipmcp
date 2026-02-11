@@ -16,23 +16,34 @@ TIMEZONE = ZoneInfo("America/Los_Angeles")
 _client: Optional[zulip.Client] = None
 _cache = diskcache.Cache(Path(__file__).parent.parent / ".cache")
 _ignored_streams: set[str] = set()
+_ALL_PRIVATE_STREAMS = "__ALL__"
 
 
-def _allowed_private_streams() -> set[str] | None:
-    """Return allowed private streams from env, or None for unrestricted."""
-    raw = os.environ.get("BABA_ALLOWED_PRIVATE_STREAMS", "").strip()
+def _allowed_private_streams() -> set[str]:
+    """Return allowed private streams from env.
+
+    Security model:
+    - Unset/empty env => no private stream access (default-deny)
+    - "__ALL__" => explicit full private stream access
+    - list/string => explicit allowlist (normalized to lowercase)
+    """
+    raw = os.environ.get("BOT_ALLOWED_PRIVATE_STREAMS", "").strip()
     if not raw:
-        return None
+        return set()
+    if raw == _ALL_PRIVATE_STREAMS:
+        return {_ALL_PRIVATE_STREAMS}
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
             return {str(s).lower() for s in parsed if str(s).strip()}
         if isinstance(parsed, str):
+            if parsed == _ALL_PRIVATE_STREAMS:
+                return {_ALL_PRIVATE_STREAMS}
             return {parsed.lower()}
     except json.JSONDecodeError:
-        # Backward-compatible fallback: comma-separated list
+        # Comma-separated fallback
         return {s.strip().lower() for s in raw.split(",") if s.strip()}
-    return None
+    return set()
 
 
 def is_private_stream_allowed(stream_name: str) -> bool:
@@ -40,7 +51,7 @@ def is_private_stream_allowed(stream_name: str) -> bool:
     if not is_stream_private(stream_name):
         return True
     allowed = _allowed_private_streams()
-    if allowed is None:
+    if _ALL_PRIVATE_STREAMS in allowed:
         return True
     return stream_name.lower() in allowed
 
@@ -659,7 +670,7 @@ def list_streams(include_private: bool = False) -> list[dict]:
         return []
     streams = result.get("streams", [])
     allowed = _allowed_private_streams()
-    if allowed is not None:
+    if _ALL_PRIVATE_STREAMS not in allowed:
         streams = [
             s for s in streams
             if not s.get("invite_only", False) or s["name"].lower() in allowed
