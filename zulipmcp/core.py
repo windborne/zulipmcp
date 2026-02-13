@@ -149,21 +149,24 @@ def resolve_name(query: str) -> list[dict]:
 
 
 # ============================================================================
-# Bot visibility filtering — /nobots support
+# Bot visibility filtering — /nobots and /nb support
 # ============================================================================
+
+_NOBOTS_KEYWORDS = ("/nobots", "/nb")
+
 
 def _should_hide_from_bot(msg: dict) -> bool:
     """Check if a message should be hidden from bots.
 
     Returns True if:
-    - The topic contains '/nobots' (case-insensitive)
-    - The message content starts with '/nobots' (case-insensitive, after stripping)
+    - The topic contains '/nobots' or '/nb' (case-insensitive)
+    - The message content starts with '/nobots' or '/nb' (case-insensitive, after stripping)
     """
-    topic = msg.get("subject", "")
-    if "/nobots" in topic.lower():
+    topic = msg.get("subject", "").lower()
+    if any(kw in topic for kw in _NOBOTS_KEYWORDS):
         return True
-    content = msg.get("content", "").strip()
-    if content.lower().startswith("/nobots"):
+    content = msg.get("content", "").strip().lower()
+    if any(content.startswith(kw) for kw in _NOBOTS_KEYWORDS):
         return True
     return False
 
@@ -330,7 +333,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     Smart timestamps: date shown only when it changes, time shown on 5+ min gaps.
     include_topic=True adds stream and topic attributes to each <msg> tag.
 
-    Note: Messages in /nobots topics or starting with /nobots are automatically
+    Note: Messages in /nobots or /nb topics or starting with /nobots or /nb are automatically
     filtered out and will not be shown to the bot.
     """
     if not messages:
@@ -562,7 +565,7 @@ def list_streams(include_private: bool = False) -> list[dict]:
 def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
     """Get recent topics in a stream. Returns list of topic dicts.
 
-    Note: Topics containing '/nobots' are filtered out and will not be shown to bots.
+    Note: Topics containing '/nobots' or '/nb' are filtered out and will not be shown to bots.
     """
     if not is_private_stream_allowed(stream):
         raise ValueError(f"Private stream access denied: {stream}")
@@ -574,8 +577,9 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
     if result["result"] != "success":
         raise ValueError(f"Error fetching topics: {result.get('msg', '')}")
     topics = result.get("topics", [])
-    # Filter out /nobots topics
-    topics = [t for t in topics if "/nobots" not in t.get("name", "").lower()]
+    # Filter out /nobots and /nb topics
+    topics = [t for t in topics
+              if not any(kw in t.get("name", "").lower() for kw in _NOBOTS_KEYWORDS)]
     return topics[:limit]
 
 
