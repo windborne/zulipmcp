@@ -1,6 +1,7 @@
 import os
 import time
 import tempfile
+import json
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -15,6 +16,44 @@ _client: Optional[zulip.Client] = None
 _cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
     Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
+_ALL_PRIVATE_STREAMS = "__ALL__"
+
+
+def _allowed_private_streams() -> set[str]:
+    """Return allowed private streams from env.
+
+    Security model:
+    - Unset/empty env => no private stream access (default-deny)
+    - "__ALL__" => explicit full private stream access
+    - list/string => explicit allowlist (normalized to lowercase)
+    """
+    raw = os.environ.get("BOT_ALLOWED_PRIVATE_STREAMS", "").strip()
+    if not raw:
+        return set()
+    if raw == _ALL_PRIVATE_STREAMS:
+        return {_ALL_PRIVATE_STREAMS}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return {str(s).lower() for s in parsed if str(s).strip()}
+        if isinstance(parsed, str):
+            if parsed == _ALL_PRIVATE_STREAMS:
+                return {_ALL_PRIVATE_STREAMS}
+            return {parsed.lower()}
+    except json.JSONDecodeError:
+        # Comma-separated fallback
+        return {s.strip().lower() for s in raw.split(",") if s.strip()}
+    return set()
+
+
+def is_private_stream_allowed(stream_name: str) -> bool:
+    """Whether the current process is allowed to access this private stream."""
+    if not is_stream_private(stream_name):
+        return True
+    allowed = _allowed_private_streams()
+    if _ALL_PRIVATE_STREAMS in allowed:
+        return True
+    return stream_name.lower() in allowed
 
 
 def set_ignored_streams(streams: set[str]) -> None:
@@ -26,6 +65,27 @@ def set_ignored_streams(streams: set[str]) -> None:
 def get_ignored_streams() -> set[str]:
     """Return the current ignored streams set."""
     return _ignored_streams
+
+
+def is_stream_private(stream_name: str) -> bool:
+    """Check if a stream is private (invite_only). Cached for 1 hour."""
+    cache_key = ("is_stream_private", stream_name.lower())
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Fetch all streams and cache every one — avoids repeated API calls
+    result = get_client().get_streams(include_public=True, include_subscribed=True)
+    if result["result"] != "success":
+        return False
+
+    for s in result.get("streams", []):
+        is_private = s.get("invite_only", False)
+        _cache.set(("is_stream_private", s["name"].lower()), is_private, expire=3600)
+
+    # Re-check cache after populating
+    cached = _cache.get(cache_key)
+    return cached if cached is not None else False
 
 
 def get_client() -> zulip.Client:
@@ -299,7 +359,10 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         if time_attr:
             attrs.append(time_attr)
         if include_topic and msg.get("type") == "stream":
-            attrs.append(f'stream="{msg.get("display_recipient", "")}"')
+            stream_name = msg.get("display_recipient", "")
+            visibility = "private" if is_stream_private(stream_name) else "public"
+            attrs.append(f'stream="{stream_name}"')
+            attrs.append(f'visibility="{visibility}"')
             attrs.append(f'topic="{msg.get("subject", "")}"')
         attrs.append(f'id="{msg_id}"')
 
@@ -402,7 +465,8 @@ def format_topics(messages: list[dict], combine: bool = True) -> str:
 
     sections = []
     for (stream, topic), group_msgs in sorted_groups:
-        header = f"Stream: {stream}, Topic: {topic}"
+        visibility = "[private]" if is_stream_private(stream) else "[public]"
+        header = f"Stream: {visibility} {stream}, Topic: {topic}"
         body = format_messages(group_msgs, include_topic=False, combine=combine)
         sections.append(f"{header}\n{body}")
 
@@ -484,6 +548,12 @@ def list_streams(include_private: bool = False) -> list[dict]:
     if result["result"] != "success":
         return []
     streams = result.get("streams", [])
+    allowed = _allowed_private_streams()
+    if _ALL_PRIVATE_STREAMS not in allowed:
+        streams = [
+            s for s in streams
+            if not s.get("invite_only", False) or s["name"].lower() in allowed
+        ]
     if not include_private:
         streams = [s for s in streams if not s.get("invite_only", False)]
     return sorted(streams, key=lambda s: s["name"])
@@ -494,6 +564,8 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
 
     Note: Topics containing '/nobots' are filtered out and will not be shown to bots.
     """
+    if not is_private_stream_allowed(stream):
+        raise ValueError(f"Private stream access denied: {stream}")
     client = get_client()
     result = client.get_stream_id(stream)
     if result["result"] != "success":
@@ -510,6 +582,8 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
 def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
                        before_message_id: Optional[int] = None) -> list[dict]:
     """Get messages from a specific stream/topic. Returns raw message dicts sorted by ID."""
+    if not is_private_stream_allowed(stream):
+        return []
     result = get_client().get_messages({
         "narrow": [
             {"operator": "stream", "operand": stream},
@@ -530,6 +604,8 @@ def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
 def fetch_new_messages(stream: str, topic: str, after_id: int,
                        exclude_user_id: Optional[int] = None) -> list[dict]:
     """Fetch messages after a given ID, optionally excluding a user. Sorted by ID."""
+    if not is_private_stream_allowed(stream):
+        return []
     result = get_client().get_messages({
         "narrow": [
             {"operator": "stream", "operand": stream},
@@ -556,6 +632,23 @@ def send_message(stream: str, topic: str, content: str) -> dict:
         "type": "stream",
         "to": stream,
         "subject": topic,
+        "content": content,
+    })
+
+
+def send_direct_message(recipients: list[str], content: str) -> dict:
+    """Send a direct message (DM) to one or more users.
+
+    Args:
+        recipients: List of email addresses to send to.
+        content: Message content (supports Zulip markdown).
+
+    Returns:
+        API result dict with 'id' on success.
+    """
+    return get_client().send_message({
+        "type": "direct",
+        "to": recipients,
         "content": content,
     })
 
@@ -760,7 +853,12 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     })
     if result.get("result") != "success" or not result.get("messages"):
         return None
-    return result["messages"][0]
+    msg = result["messages"][0]
+    if msg.get("type") == "stream":
+        stream = msg.get("display_recipient", "")
+        if stream and not is_private_stream_allowed(stream):
+            return None
+    return msg
 
 
 def verify_message(message_id: int) -> str:
@@ -855,11 +953,20 @@ def get_subscribed_streams() -> list[dict]:
     result = get_client().get_subscriptions()
     if result["result"] != "success":
         return []
-    return sorted(result.get("subscriptions", []), key=lambda s: s["name"])
+    subs = result.get("subscriptions", [])
+    allowed = _allowed_private_streams()
+    if allowed is not None:
+        subs = [
+            s for s in subs
+            if not s.get("invite_only", False) or s["name"].lower() in allowed
+        ]
+    return sorted(subs, key=lambda s: s["name"])
 
 
 def get_stream_members(stream: str) -> list[dict]:
     """Get members of a stream. Returns list of user dicts with 'full_name' and 'email'."""
+    if not is_private_stream_allowed(stream):
+        raise ValueError(f"Private stream access denied: {stream}")
     client = get_client()
     result = client.get_stream_id(stream)
     if result["result"] != "success":
