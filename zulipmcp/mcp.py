@@ -9,8 +9,8 @@ Usage:
     python -m zulipmcp.mcp --transport sse  # SSE
 
 Bot visibility filtering:
-    - Topics containing '/nobots' are hidden from the bot (not shown in topic lists or messages)
-    - Messages starting with '/nobots' are hidden from the bot
+    - Topics containing '/nobots' or '/nb' are hidden from the bot (not shown in topic lists or messages)
+    - Messages starting with '/nobots' or '/nb' are hidden from the bot
     This allows humans to have private conversations that the bot won't see or respond to.
 """
 
@@ -300,7 +300,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     Blocks until a new message arrives or the timeout expires.
     Default to 1 hour. Use longer timeouts for follow-up waits.
 
-    Note: Messages in /nobots topics or starting with /nobots are automatically
+    Note: Messages in /nobots (or /nb) topics or starting with /nobots (or /nb) are automatically
     filtered and will not trigger a return from this function.
 
     Args:
@@ -356,7 +356,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             if messages:
                 _session.last_seen_message_id = messages[-1]["id"]
 
-            # Filter out /nobots messages before checking if we have anything to show
+            # Filter out /nobots and /nb messages before checking if we have anything to show
             visible_messages = zulip_core.filter_for_bot(messages)
             if visible_messages:
                 _logger.info(f"[{listen_id}] iter={iteration} GOT {len(visible_messages)} visible messages (of {len(messages)} total), returning")
