@@ -1,8 +1,7 @@
+import os
 import time
 import tempfile
-import os
 import json
-from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -14,7 +13,8 @@ import zulip
 TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 _client: Optional[zulip.Client] = None
-_cache = diskcache.Cache(Path(__file__).parent.parent / ".cache")
+_cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
+    Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
 
@@ -148,136 +148,6 @@ def resolve_name(query: str) -> list[dict]:
     return matches
 
 
-class _ZulipHTMLParser(HTMLParser):
-    """Converts Zulip HTML to clean plaintext via tree walk.
-
-    Handles the common cases cleanly (paragraphs, line breaks, links, code,
-    blockquotes, spoilers, lists, images). Anything exotic passes through as-is.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._parts: list[str] = []
-        self._stack: list[str] = []  # tag stack
-        self._attrs_stack: list[dict] = []
-        self._suppress = False  # inside a tag whose text we skip
-
-    def _in(self, cls_name: str) -> bool:
-        """Check if we're inside a div with the given class."""
-        return any(a.get("class", "") and cls_name in a.get("class", "")
-                   for a in self._attrs_stack)
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        self._stack.append(tag)
-        self._attrs_stack.append(a)
-
-        if tag == "br":
-            self._parts.append("\n")
-            self._stack.pop()
-            self._attrs_stack.pop()
-        elif tag == "p":
-            if not self._in("spoiler-header"):
-                if self._parts and not self._parts[-1].endswith("\n\n"):
-                    self._parts.append("\n\n")
-        elif tag == "blockquote":
-            self._parts.append("\n<BLOCKQUOTE>")
-        elif tag == "code":
-            # Check if inside a <pre> (code block) or standalone (inline)
-            if "pre" in self._stack[:-1]:
-                self._parts.append("\n```\n")
-            else:
-                self._parts.append("`")
-        elif tag == "li":
-            self._parts.append("\n- ")
-        elif tag == "img":
-            src = a.get("src", "")
-            if src:
-                self._parts.append(f"[image: {src}]")
-            self._stack.pop()
-            self._attrs_stack.pop()
-        elif tag == "div":
-            cls = a.get("class", "")
-            if "spoiler-header" in cls:
-                self._parts.append("\n<spoiler title=\"")
-            elif "spoiler-content" in cls:
-                self._parts.append("\n")
-        elif tag == "span":
-            cls = a.get("class", "")
-            if "katex" in cls:
-                self._suppress = True
-        elif tag == "annotation":
-            # Inside katex — this has the raw TeX
-            if a.get("encoding") == "application/x-tex":
-                self._suppress = False
-                self._parts.append("$")
-
-    def handle_endtag(self, tag):
-        if tag == "br" or tag == "img":
-            return
-
-        if tag == "blockquote":
-            self._parts.append("</BLOCKQUOTE>\n")
-        elif tag == "code":
-            if "pre" in self._stack[:-1]:
-                self._parts.append("\n```\n")
-            else:
-                self._parts.append("`")
-        elif tag == "a":
-            pass  # link text emitted by handle_data
-        elif tag == "div":
-            a = self._attrs_stack[-1] if self._attrs_stack else {}
-            cls = a.get("class", "")
-            if "spoiler-header" in cls:
-                self._parts.append("\">\n")
-            elif "spoiler-block" in cls:
-                self._parts.append("\n</spoiler>\n")
-        elif tag == "annotation":
-            self._parts.append("$")
-            self._suppress = True  # suppress rest of katex
-        elif tag == "span":
-            a = self._attrs_stack[-1] if self._attrs_stack else {}
-            if "katex" in a.get("class", ""):
-                self._suppress = False
-
-        if self._stack and self._stack[-1] == tag:
-            self._stack.pop()
-            self._attrs_stack.pop()
-
-    def handle_data(self, data):
-        if self._suppress:
-            return
-        if self._in("spoiler-header"):
-            data = data.strip()
-            if not data:
-                return
-        self._parts.append(data)
-
-    def get_text(self) -> str:
-        text = "".join(self._parts)
-        # Process blockquotes (we used markers to avoid nesting issues)
-        while "<BLOCKQUOTE>" in text:
-            def _quote_block(segment):
-                lines = segment.split("\n")
-                return "\n".join(f"> {l}" if l else ">" for l in lines)
-            start = text.index("<BLOCKQUOTE>")
-            end = text.index("</BLOCKQUOTE>", start)
-            inner = text[start + len("<BLOCKQUOTE>"):end]
-            quoted = _quote_block(inner.strip())
-            text = text[:start] + "\n" + quoted + "\n" + text[end + len("</BLOCKQUOTE>"):]
-        # Collapse excess newlines
-        while "\n\n\n" in text:
-            text = text.replace("\n\n\n", "\n\n")
-        return text.strip()
-
-
-def _html_to_text(html: str) -> str:
-    """Convert Zulip HTML content to clean plaintext."""
-    parser = _ZulipHTMLParser()
-    parser.feed(html)
-    return parser.get_text()
-
-
 # ============================================================================
 # Bot visibility filtering — /nobots support
 # ============================================================================
@@ -292,7 +162,7 @@ def _should_hide_from_bot(msg: dict) -> bool:
     topic = msg.get("subject", "")
     if "/nobots" in topic.lower():
         return True
-    content = _html_to_text(msg.get("content", "")).strip()
+    content = msg.get("content", "").strip()
     if content.lower().startswith("/nobots"):
         return True
     return False
@@ -416,6 +286,7 @@ def _paginated_fetch(client: zulip.Client, narrow: list[dict],
             "num_before": 500,
             "num_after": 0,
             "narrow": narrow,
+            "apply_markdown": False,
         })
         if result["result"] != "success":
             break
@@ -478,7 +349,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     for msg in messages:
         sender = msg.get("sender_full_name", "Unknown")
         msg_id = msg.get("id", "")
-        content = _html_to_text(msg.get("content", ""))
+        content = msg.get("content", "")
         timestamp = msg.get("timestamp", 0)
 
         # Build the time attribute
@@ -495,6 +366,11 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'topic="{msg.get("subject", "")}"')
         attrs.append(f'id="{msg_id}"')
 
+        # Add reaction summary as attribute if present
+        reaction_str = summarize_reactions(msg.get("reactions", []))
+        if reaction_str:
+            attrs.append(f'reactions="{reaction_str}"')
+
         tag_open = "<msg " + " ".join(attrs) + ">"
         lines.append(f"{tag_open}\n{content}\n</msg>")
 
@@ -510,19 +386,22 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
 
     combined = []
     current = dict(messages[0])
+    current["reactions"] = list(current.get("reactions", []))
 
     for msg in messages[1:]:
         same_user = msg.get("sender_full_name") == current.get("sender_full_name")
         time_gap = msg.get("timestamp", 0) - current.get("time_range_end", current.get("timestamp", 0))
 
         if same_user and time_gap <= 120:
-            # Merge: append content, update end time and id
+            # Merge: append content, update end time, id, and reactions
             current["content"] = current["content"] + "\n\n" + msg.get("content", "")
             current["time_range_end"] = msg.get("timestamp", 0)
             current["id"] = msg.get("id", current["id"])
+            current["reactions"].extend(msg.get("reactions", []))
         else:
             combined.append(current)
             current = dict(msg)
+            current["reactions"] = list(current.get("reactions", []))
 
     combined.append(current)
     return combined
@@ -713,6 +592,7 @@ def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
         "anchor": before_message_id or "newest",
         "num_before": min(num_messages, 100),
         "num_after": 0,
+        "apply_markdown": False,
     })
     if result["result"] != "success":
         return []
@@ -735,6 +615,7 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
         "num_before": 0,
         "num_after": 100,
         "include_anchor": False,
+        "apply_markdown": False,
     })
     if result["result"] != "success":
         return []
@@ -789,6 +670,148 @@ def remove_reaction(message_id: int, emoji_name: str) -> dict:
     })
 
 
+def edit_message(message_id: int, content: str) -> dict:
+    """Edit a message's content. Returns API result dict."""
+    return get_client().update_message({
+        "message_id": message_id,
+        "content": content,
+    })
+
+
+def send_dm(user_email: str, content: str) -> dict:
+    """Send a direct message to a user. Returns API result dict with 'id' on success."""
+    return get_client().send_message({
+        "type": "direct",
+        "to": [user_email],
+        "content": content,
+    })
+
+
+_stream_id_cache: dict[str, int] = {}
+
+
+def send_typing(stream: str, topic: str, op: str = "start") -> dict:
+    """Send a typing indicator start/stop to a stream/topic.
+
+    Args:
+        stream: Stream name.
+        topic: Topic name.
+        op: "start" or "stop".
+
+    Returns API result dict.
+    """
+    client = get_client()
+    stream_id = _stream_id_cache.get(stream)
+    if stream_id is None:
+        stream_result = client.get_stream_id(stream)
+        if stream_result["result"] != "success":
+            return stream_result
+        stream_id = stream_result["stream_id"]
+        _stream_id_cache[stream] = stream_id
+    return client.call_endpoint(
+        url="/typing",
+        method="POST",
+        request={
+            "op": op,
+            "type": "stream",
+            "stream_id": stream_id,
+            "topic": topic,
+        },
+    )
+
+
+def list_emoji(query: str = "") -> tuple[list[str], int]:
+    """List custom emoji, optionally filtered by substring.
+
+    Returns (matching_names, total_count).
+    """
+    client = get_client()
+    result = client.get_realm_emoji()
+    if result.get("result") != "success":
+        return [], 0
+    all_emoji = sorted(
+        info["name"]
+        for info in result.get("emoji", {}).values()
+        if not info.get("deactivated", False)
+    )
+    total = len(all_emoji)
+    if query:
+        q = query.lower()
+        return [name for name in all_emoji if q in name.lower()], total
+    return all_emoji, total
+
+
+def get_emoji_count() -> int:
+    """Return count of active custom emoji. Returns 0 on error."""
+    try:
+        result = get_client().get_realm_emoji()
+        if result.get("result") != "success":
+            return 0
+        return sum(
+            1 for info in result.get("emoji", {}).values()
+            if not info.get("deactivated", False)
+        )
+    except Exception:
+        return 0
+
+
+def summarize_reactions(reactions: list) -> str:
+    """Summarize a list of Zulip reaction dicts into a compact string.
+
+    Returns e.g. ":thumbs_up: x2  :check:" or empty string if none.
+    """
+    counts: dict[str, int] = {}
+    for r in reactions:
+        name = r.get("emoji_name", "")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return ""
+    return "  ".join(
+        f":{name}: x{n}" if n > 1 else f":{name}:"
+        for name, n in counts.items()
+    )
+
+
+def check_reactions_on(message_id: int) -> str:
+    """Fetch a single message by ID and return its reaction summary, or empty string."""
+    try:
+        result = get_client().call_endpoint(
+            url=f"/messages/{message_id}",
+            method="GET",
+        )
+        if result.get("result") != "success":
+            return ""
+        msg = result.get("message", {})
+        reaction_str = summarize_reactions(msg.get("reactions", []))
+        if not reaction_str:
+            return ""
+        return f"Reactions on message {message_id}: {reaction_str}"
+    except Exception:
+        return ""
+
+
+def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
+    """Look up a message by ID and return its (stream, topic), or None for DMs/errors."""
+    result = get_client().get_messages({
+        "anchor": message_id,
+        "num_before": 0,
+        "num_after": 0,
+        "include_anchor": True,
+        "apply_markdown": False,
+    })
+    if result.get("result") != "success" or not result.get("messages"):
+        return None
+    target = result["messages"][0]
+    if target.get("type") != "stream":
+        return None
+    stream = target.get("display_recipient", "")
+    topic = target.get("subject", "")
+    if not stream or not topic:
+        return None
+    return stream, topic
+
+
 def get_custom_profile_fields() -> list[dict]:
     """Get the org's custom profile field definitions. Cached aggressively."""
     cache_key = ("custom_profile_fields",)
@@ -816,11 +839,21 @@ def get_user_info(email: str) -> Optional[dict]:
 
 
 def get_message_by_id(message_id: int) -> Optional[dict]:
-    """Get a specific message by ID. Returns message dict or None."""
-    result = get_client().get_raw_message(message_id)
-    if result.get("result") != "success":
+    """Get a specific message by ID. Returns message dict or None.
+
+    Uses get_messages with apply_markdown=False so the content field contains
+    raw markdown (consistent with get_topic_messages), not rendered HTML.
+    """
+    result = get_client().get_messages({
+        "anchor": message_id,
+        "num_before": 0,
+        "num_after": 0,
+        "include_anchor": True,
+        "apply_markdown": False,
+    })
+    if result.get("result") != "success" or not result.get("messages"):
         return None
-    msg = result["message"]
+    msg = result["messages"][0]
     if msg.get("type") == "stream":
         stream = msg.get("display_recipient", "")
         if stream and not is_private_stream_allowed(stream):
@@ -851,8 +884,8 @@ def verify_message(message_id: int) -> str:
     stream = msg.get("display_recipient", "Unknown") if msg.get("type") == "stream" else "DM"
     topic = msg.get("subject", "Unknown") if msg.get("type") == "stream" else "N/A"
 
-    # Convert HTML to plaintext, then strip # and @ so delimiters can't be forged
-    content = _html_to_text(msg.get("content", ""))
+    # Strip # and @ so delimiters can't be forged in content
+    content = msg.get("content", "")
     content = content.replace("#", "").replace("@", "")
 
     return (
