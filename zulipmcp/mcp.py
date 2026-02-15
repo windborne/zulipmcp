@@ -18,7 +18,6 @@ import time
 import asyncio
 import logging
 import os
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -414,173 +413,6 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             try:
                 zulip_core.remove_reaction(listen_msg_id, "robot_ear")
                 _logger.debug(f"[{listen_id}] Removed robot_ear reaction")
-            except Exception as e:
-                _logger.warning(f"[{listen_id}] Failed to remove reaction: {e}")
-
-
-@mcp.tool()
-async def listen_and_babysit(
-    timeout_hours: float,
-    workers: list[dict],
-    check_interval: int = 60,
-    ctx: Context = None,
-) -> str:
-    """Wait for messages while monitoring training run worker health.
-
-    Use this instead of listen() when babysitting a training run. Monitors worker
-    processes on remote hosts via SSH and returns immediately if workers crash.
-
-    To get worker info from a training run config:
-    - hosts: from run's `nodes` dict keys (e.g., {'stinson': 8} → host='stinson')
-    - pattern: the activity/run name (e.g., 'delta', 'ng_main_nodec_da_...')
-    - expected_count: nproc_per_node for that host (usually 8 for 8-GPU nodes)
-
-    Worker processes are identified by grepping for the pattern in `ps aux`. The
-    pattern should match the activity name that appears in worker command lines.
-
-    Args:
-        timeout_hours: Max wait time in hours (e.g., 3.0 for 3 hours).
-        workers: List of worker specs, each a dict with:
-            - host: hostname to SSH to (e.g., 'stinson', 'pismo')
-            - pattern: grep pattern to find workers (e.g., 'delta')
-            - expected_count: expected number of workers (e.g., 8)
-        check_interval: Seconds between health checks (default 60).
-    """
-    listen_id = f"babysit_{int(time.time())}_{os.getpid()}"
-    _logger.info(f"[{listen_id}] listen_and_babysit() START: timeout_hours={timeout_hours}, workers={workers}")
-
-    if not _session.active or not _session.stream or not _session.topic:
-        _logger.warning(f"[{listen_id}] No session context set")
-        return "Error: No session context set. Call set_context first."
-
-    if not workers:
-        _logger.warning(f"[{listen_id}] No workers specified")
-        return "Error: No workers specified. Provide at least one worker spec."
-
-    # Auto-stop typing — agent is just waiting, not working.
-    try:
-        zulip_core.send_typing(_session.stream, _session.topic, "stop")
-    except Exception:
-        pass
-
-    timeout_seconds = timeout_hours * 3600
-    listen_msg_id = _session.last_seen_message_id
-
-    # Add listening indicator
-    if listen_msg_id:
-        try:
-            zulip_core.add_reaction(listen_msg_id, "robot_ear")
-        except Exception as e:
-            _logger.warning(f"[{listen_id}] Failed to add reaction: {e}")
-
-    async def check_workers_health() -> Optional[str]:
-        """Check all workers, return error message if any are unhealthy."""
-        for spec in workers:
-            host = spec.get("host")
-            pattern = spec.get("pattern")
-            expected = spec.get("expected_count", 1)
-
-            if not host or not pattern:
-                continue
-
-            try:
-                # Count worker processes matching the pattern
-                # Exclude: grep itself, torchrun launcher, mother process (python3 runs/)
-                cmd = [
-                    "ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
-                    host,
-                    f'ps aux | grep "{pattern}" | grep -v grep | grep -v torchrun | grep -v "python3 runs/" | wc -l'
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                if result.returncode != 0:
-                    _logger.warning(f"[{listen_id}] SSH to {host} failed: {result.stderr}")
-                    continue
-
-                count = int(result.stdout.strip())
-                _logger.debug(f"[{listen_id}] {host}: {count}/{expected} workers for pattern '{pattern}'")
-
-                if count == 0:
-                    return f"CRASH DETECTED: No workers found on {host} for pattern '{pattern}' (expected {expected})"
-                elif count < expected:
-                    # Could be transient, log but don't alert yet
-                    _logger.warning(f"[{listen_id}] {host}: only {count}/{expected} workers (may be transient)")
-
-            except subprocess.TimeoutExpired:
-                _logger.warning(f"[{listen_id}] SSH to {host} timed out")
-            except Exception as e:
-                _logger.warning(f"[{listen_id}] Error checking {host}: {e}")
-
-        return None  # All healthy
-
-    try:
-        start = time.time()
-        end = start + timeout_seconds
-        last_heartbeat = start
-        last_health_check = start
-        iteration = 0
-        consecutive_low_count = 0  # Track consecutive low worker counts
-
-        while time.time() < end:
-            iteration += 1
-            now = time.time()
-
-            # Check for new messages (every 2s)
-            try:
-                messages = zulip_core.fetch_new_messages(
-                    _session.stream, _session.topic,
-                    _session.last_seen_message_id, _session.my_user_id,
-                )
-            except Exception as e:
-                _logger.error(f"[{listen_id}] iter={iteration} fetch_new_messages EXCEPTION: {e}")
-                raise
-
-            if messages:
-                _session.last_seen_message_id = messages[-1]["id"]
-
-            visible_messages = zulip_core.filter_for_bot(messages)
-            if visible_messages:
-                _logger.info(f"[{listen_id}] iter={iteration} GOT {len(visible_messages)} messages, returning")
-                return "New messages:\n\n" + zulip_core.format_messages(visible_messages)
-
-            # Check worker health (every check_interval seconds)
-            if now - last_health_check >= check_interval:
-                _logger.debug(f"[{listen_id}] iter={iteration} checking worker health")
-                crash_msg = await asyncio.to_thread(check_workers_health)
-                if crash_msg:
-                    _logger.error(f"[{listen_id}] {crash_msg}")
-                    return crash_msg
-                last_health_check = now
-
-            # Heartbeat (every 10s)
-            if now - last_heartbeat >= 10:
-                elapsed = int(now - start)
-                _logger.debug(f"[{listen_id}] iter={iteration} heartbeat elapsed={elapsed}s")
-                if ctx:
-                    try:
-                        await ctx.info(f"Listening + babysitting… {elapsed}s elapsed")
-                        await ctx.report_progress(progress=elapsed, total=timeout_seconds)
-                    except Exception as e:
-                        _logger.error(f"[{listen_id}] ctx heartbeat failed: {e}")
-                        raise
-                last_heartbeat = now
-
-            await asyncio.sleep(2)
-
-        _logger.info(f"[{listen_id}] TIMEOUT after {timeout_hours} hours")
-        return (
-            f"Timeout: No new messages after {timeout_hours} hours.\n"
-            "Workers were healthy throughout.\n\n"
-            "[Hint: Send a check-in message, then wait again.]"
-        )
-
-    except Exception as e:
-        _logger.error(f"[{listen_id}] UNHANDLED EXCEPTION: {e}", exc_info=True)
-        raise
-    finally:
-        _logger.info(f"[{listen_id}] listen_and_babysit() FINALLY block")
-        if listen_msg_id:
-            try:
-                zulip_core.remove_reaction(listen_msg_id, "robot_ear")
             except Exception as e:
                 _logger.warning(f"[{listen_id}] Failed to remove reaction: {e}")
 
@@ -985,24 +817,6 @@ def edit_message(message_id: int, content: str) -> str:
 
 
 @mcp.tool()
-def send_dm(user_email: str, content: str) -> str:
-    """Send a direct message to a user.
-
-    Args:
-        user_email: The email address of the recipient.
-        content: The message content (supports Zulip markdown).
-
-    Returns:
-        Confirmation with the sent message ID, or an error message.
-    """
-    prefix = _get_prefix()
-    result = zulip_core.send_dm(user_email, prefix + content)
-    if result.get("result") != "success":
-        return f"Error sending DM: {result.get('msg', 'Unknown error')}"
-    return f"DM sent to {user_email} (id: {result.get('id')})"
-
-
-@mcp.tool()
 def list_emoji(query: str = "") -> str:
     """Search custom emoji available on this Zulip server.
 
@@ -1197,7 +1011,7 @@ def upload_file(file_path: str) -> str:
 # Server entry point
 # ============================================================================
 
-def run_server(transport: str = "stdio", host: str = "0.0.0.0", port: int = 8235):
+def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:

@@ -18,7 +18,7 @@ from .core import (
     add_reaction,
     remove_reaction,
     edit_message,
-    send_dm,
+    send_direct_message,
     send_typing,
     list_emoji,
     get_emoji_count,

@@ -9,14 +9,13 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 
 - Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
 - A `.zuliprc` file in the project root for Zulip API auth
-- SSH access to the [windborne](https://github.com/windborne) GitHub org (private repo)
 
 ## Using with Claude Code
 
 1. Install the package:
 
    ```bash
-   uv add zulipmcp --git ssh://git@github.com/windborne/zulipmcp.git
+   uv add zulipmcp --git https://github.com/windborne/zulipmcp.git
    ```
 
 2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Configuring the Python bindings](https://zulip.com/api/configuring-python-bindings) for details on the file format and how to download one from your Zulip organization.
@@ -43,7 +42,7 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 | `uv run python -m zulipmcp.mcp` | MCP server for Claude Code / MCP clients |
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
 
-## Key design detials
+## Key design details
 
 ### Listening for messages
 
@@ -62,6 +61,10 @@ When `reply` is called, it checks for new messages *before* sending. If anyone p
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
+
+## Logging
+
+Logs are written to `/tmp/zulipmcp_logs` by default. Override with the `ZULIPMCP_LOG_DIR` environment variable.
 
 ## Style Notes
 

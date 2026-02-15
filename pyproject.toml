@@ -1,12 +1,19 @@
 [project]
 name = "zulipmcp"
 version = "0.1.0"
+description = "Clean Zulip MCP interface for LLMs"
+license = "MIT"
+authors = [{name = "WindBorne Systems"}]
 requires-python = ">=3.10"
 dependencies = [
     "diskcache",
     "fastmcp",
     "zulip",
 ]
+
+[project.urls]
+Homepage = "https://github.com/windborne/zulipmcp"
+Repository = "https://github.com/windborne/zulipmcp"
 
 [tool.setuptools.packages.find]
 include = ["zulipmcp*"]

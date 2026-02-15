@@ -682,15 +682,6 @@ def edit_message(message_id: int, content: str) -> dict:
     })
 
 
-def send_dm(user_email: str, content: str) -> dict:
-    """Send a direct message to a user. Returns API result dict with 'id' on success."""
-    return get_client().send_message({
-        "type": "direct",
-        "to": [user_email],
-        "content": content,
-    })
-
-
 _stream_id_cache: dict[str, int] = {}
 
 
