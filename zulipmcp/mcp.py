@@ -797,6 +797,20 @@ def add_reaction(message_id: int, emoji_name: str) -> str:
 
 
 @mcp.tool()
+def remove_reaction(message_id: int, emoji_name: str) -> str:
+    """Remove an emoji reaction from a message.
+
+    Args:
+        message_id: The message ID.
+        emoji_name: Emoji name without colons (e.g. "thumbs_up", "check").
+    """
+    result = zulip_core.remove_reaction(message_id, emoji_name)
+    if result["result"] != "success":
+        return f"Error removing reaction: {result.get('msg', 'Unknown error')}"
+    return f"Removed :{emoji_name}: from message {message_id}"
+
+
+@mcp.tool()
 def edit_message(message_id: int, content: str) -> str:
     """Edit a message the bot previously sent.
 
