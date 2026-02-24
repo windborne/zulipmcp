@@ -41,6 +41,37 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 |---|---|
 | `uv run python -m zulipmcp.mcp` | MCP server for Claude Code / MCP clients |
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
+| `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns Claude Code sessions |
+
+## Listener
+
+The optional `zulipmcp.listener` module watches Zulip for @mentions and spawns one headless Claude Code session per (stream, topic). It's the glue between Zulip events and Claude Code — the MCP server handles all the Zulip tools, the listener just handles lifecycle.
+
+```bash
+# Minimal — uses ./.zuliprc, ./.mcp.json (if present), and the bundled default prompt
+uv run python -m zulipmcp.listener
+
+# Full — override MCP config and system prompt
+uv run python -m zulipmcp.listener \
+    --mcp-config .mcp.json \
+    --system-prompt agent.md \
+    --log-dir ./logs
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--zuliprc` | `./.zuliprc` | Path to `.zuliprc` (resolved relative to current working directory) |
+| `--mcp-config` | `./.mcp.json` | Path to `.mcp.json` for Claude Code sessions (used only if the file exists) |
+| `--system-prompt` | `zulipmcp/default_system_prompt.md` | Appended system prompt file (default path is resolved relative to `listener.py`, not the current working directory) |
+| `--working-dir` | `.` | Working directory for spawned sessions |
+| `--claude-command` | `claude` | Claude CLI binary name or path |
+| `--log-dir` | `./logs` | Directory for session log files |
+
+Each session gets `TRIGGER_MESSAGE_ID` and `SESSION_USER_EMAIL` set automatically so `set_context()` anchors to the @mention and hooks can identify the requester.
+
+The listener is deliberately minimal (~90 lines of code). It omits concurrency caps, workspace isolation, staleness watchdogs, and dashboards — add those when you need them.
 
 ## Key design details
 
