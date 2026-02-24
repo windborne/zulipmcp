@@ -82,7 +82,7 @@ def configure(**kwargs):
             Returns a prefix string prepended to all outgoing messages
             (reply and send_message). Return "" to skip.
         on_session_end: callable(session_state) -> None
-            Called when end_session()/sign_off() is invoked. Receives the
+            Called when end_session() is invoked. Receives the
             SessionState object. Use for cleanup (e.g. writing exit markers).
             For backwards compatibility, also accepts () -> None.
         on_set_context: callable(stream: str, topic: str) -> str
@@ -182,9 +182,16 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
     if trigger_msg_id:
         try:
-            _session.last_seen_message_id = int(trigger_msg_id)
+            trigger_id = int(trigger_msg_id)
+            _session.last_seen_message_id = trigger_id
         except (ValueError, TypeError):
-            pass
+            trigger_id = None
+        if trigger_id is not None:
+            # Auto-react :eyes: on the trigger message — instant "I saw this" signal
+            try:
+                zulip_core.add_reaction(trigger_id, "eyes")
+            except Exception:
+                pass
 
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
     header = f"Session context set to {visibility} #{stream} > {topic}"
@@ -455,22 +462,22 @@ def _stop_typing_safe():
             pass
 
 
-def _cleanup_session():
-    """Common cleanup for end_session and sign_off: markers, typing, hook."""
-    _write_exit_markers()
-    _stop_typing_safe()
-    _fire_session_end_hook()
-
-
 @mcp.tool()
-def end_session() -> str:
+def end_session(message: str = "") -> str:
     """End the current session gracefully.
     Writes a clean exit marker so the listener knows this was intentional.
+
+    If a message is provided, it is posted as a farewell (with session duration
+    appended). If omitted, the session ends silently.
+
+    Args:
+        message: Optional farewell message to post before ending.
+            If empty, the session ends without posting anything.
 
     Returns:
         Confirmation that the session has ended.
     """
-    _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}")
+    _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}, message={bool(message)}")
 
     # Write exit markers before anything else — even if session isn't active,
     # DM sessions may never call set_context() but still need the marker.
@@ -480,66 +487,32 @@ def end_session() -> str:
         _logger.warning("end_session() called with no active session")
         return "Session ended."
 
-    info = f"Session ended. Was chatting in #{_session.stream} > {_session.topic}"
+    stream, topic = _session.stream, _session.topic
+
+    # Post farewell if message provided
+    if message and stream and topic:
+        duration_secs = int(time.time() - _session.started_at) if _session.started_at else 0
+        duration_str = f"{duration_secs}s" if duration_secs < 60 else f"{duration_secs // 60}m"
+
+        prefix = _get_prefix()
+        result = zulip_core.send_message(stream, topic, prefix + message + f" | {duration_str}")
+        if result["result"] != "success":
+            _logger.error(f"end_session() farewell send_message failed: {result}")
+        else:
+            sent_id = result.get("id")
+            _session.last_sent_message_id = sent_id
+            _logger.info(f"end_session() posted farewell id={sent_id}")
 
     _stop_typing_safe()
     _fire_session_end_hook()
 
     _session.reset()
     _logger.info("end_session() completed")
-    return info
+    return f"Session ended. Was chatting in #{stream} > {topic}"
 
 
-@mcp.tool()
-def sign_off(message: str = "") -> str:
-    """Post a farewell message and end the session gracefully.
-
-    This is the preferred way to end a session. It posts a farewell to the
-    current stream/topic, then ends the session.
-
-    Args:
-        message: Optional custom farewell message. If empty, uses a default.
-    """
-    _logger.info(f"sign_off() called: stream={_session.stream}, topic={_session.topic}")
-
-    if not _session.active or not _session.stream or not _session.topic:
-        _logger.warning("sign_off() called with no active session")
-        return "No active session to sign off from."
-
-    # Calculate session stats
-    duration_secs = int(time.time() - _session.started_at) if _session.started_at else 0
-    if duration_secs < 60:
-        duration_str = f"{duration_secs}s"
-    else:
-        mins = duration_secs // 60
-        duration_str = f"{mins}m"
-
-    # Build farewell message
-    if message:
-        farewell = message
-    else:
-        farewell = ":wave: Signing off"
-
-    farewell += f" | {duration_str}"
-
-    # Post the farewell
-    prefix = _get_prefix()
-    result = zulip_core.send_message(_session.stream, _session.topic, prefix + farewell)
-    if result["result"] != "success":
-        _logger.error(f"sign_off() send_message failed: {result}")
-        # Still end the session even if farewell fails
-    else:
-        sent_id = result.get("id")
-        _session.last_sent_message_id = sent_id
-        _logger.info(f"sign_off() posted farewell id={sent_id}")
-
-    _cleanup_session()
-
-    # End the session
-    stream, topic = _session.stream, _session.topic
-    _session.reset()
-    _logger.info("sign_off() completed")
-    return f"Signed off from #{stream} > {topic}"
+# Backwards-compatible alias
+sign_off = end_session
 
 
 # ============================================================================
