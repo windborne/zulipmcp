@@ -41,19 +41,18 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 |---|---|
 | `uv run python -m zulipmcp.mcp` | MCP server for Claude Code / MCP clients |
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
-| `uv run python -m zulipmcp.listener --zuliprc .zuliprc` | Listener: watches for @mentions, spawns Claude Code sessions |
+| `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns Claude Code sessions |
 
 ## Listener
 
 The optional `zulipmcp.listener` module watches Zulip for @mentions and spawns one headless Claude Code session per (stream, topic). It's the glue between Zulip events and Claude Code — the MCP server handles all the Zulip tools, the listener just handles lifecycle.
 
 ```bash
-# Minimal — just needs a zuliprc
-uv run python -m zulipmcp.listener --zuliprc .zuliprc
+# Minimal — uses ./.zuliprc, ./.mcp.json (if present), and the bundled default prompt
+uv run python -m zulipmcp.listener
 
-# Full — with MCP config and system prompt
+# Full — override MCP config and system prompt
 uv run python -m zulipmcp.listener \
-    --zuliprc .zuliprc \
     --mcp-config .mcp.json \
     --system-prompt agent.md \
     --log-dir ./logs
@@ -63,9 +62,9 @@ uv run python -m zulipmcp.listener \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--zuliprc` | *(required)* | Path to `.zuliprc` |
-| `--mcp-config` | | Path to `.mcp.json` for Claude Code sessions |
-| `--system-prompt` | | Path to a file whose contents are appended to the system prompt |
+| `--zuliprc` | `./.zuliprc` | Path to `.zuliprc` (resolved relative to current working directory) |
+| `--mcp-config` | `./.mcp.json` | Path to `.mcp.json` for Claude Code sessions (used only if the file exists) |
+| `--system-prompt` | `zulipmcp/default_system_prompt.md` | Appended system prompt file (default path is resolved relative to `listener.py`, not the current working directory) |
 | `--working-dir` | `.` | Working directory for spawned sessions |
 | `--claude-command` | `claude` | Claude CLI binary name or path |
 | `--log-dir` | `./logs` | Directory for session log files |

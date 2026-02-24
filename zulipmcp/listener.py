@@ -1,32 +1,14 @@
-"""zulipmcp.listener — @mention → Claude Code session spawner.
+"""Listen for Zulip @mentions and spawn one Claude session per (stream, topic).
 
-Watches Zulip for @mentions via long-polling and spawns one headless Claude
-Code subprocess per (stream, topic). Pairs with the zulipmcp MCP server —
-Claude gets Zulip tools via MCP, the listener just handles lifecycle.
-
-Usage:
-    python -m zulipmcp.listener --zuliprc .zuliprc
-    python -m zulipmcp.listener --zuliprc .zuliprc --mcp-config .mcp.json --system-prompt agent.md
-
-What it does:
-    1. Long-polls Zulip for message events
-    2. Filters for stream @mentions not from self
-    3. Deduplicates by (stream, topic) — one session at a time
-    4. Spawns `claude` with --mcp-config pointing at zulipmcp
-    5. Sets TRIGGER_MESSAGE_ID so set_context() anchors correctly
-    6. Reaps finished processes via daemon monitor threads
-
-What it deliberately omits (add when you need them):
-    - Concurrency cap / queue
-    - Workspace isolation
-    - Staleness watchdog
-    - Session history database
-    - Dashboard / HTTP server
-    - Systemd integration
+Defaults:
+- `./.zuliprc` from the current working directory
+- `./.mcp.json` from the current working directory (if present)
+- bundled `default_system_prompt.md` (resolved relative to this file)
 """
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -36,16 +18,26 @@ from pathlib import Path
 
 import zulip
 
+PACKAGE_DIR = Path(__file__).resolve().parent
+DEFAULT_SYSTEM_PROMPT_PATH = PACKAGE_DIR / "default_system_prompt.md"
+
 
 @dataclass
 class Config:
     """CLI args map 1:1 to fields."""
-    zuliprc: str
-    mcp_config: str = ""
-    system_prompt: str = ""
-    working_dir: str = "."
+    zuliprc: Path
+    mcp_config: Path = Path(".mcp.json")
+    system_prompt: Path = DEFAULT_SYSTEM_PROMPT_PATH
+    working_dir: Path = Path(".")
     claude_command: str = "claude"
-    log_dir: str = "./logs"
+    log_dir: Path = Path("./logs")
+
+    def __post_init__(self):
+        self.zuliprc = Path(self.zuliprc)
+        self.mcp_config = Path(self.mcp_config)
+        self.system_prompt = Path(self.system_prompt)
+        self.working_dir = Path(self.working_dir)
+        self.log_dir = Path(self.log_dir)
 
 
 # One session per (stream, topic). Value is the Popen object.
@@ -53,14 +45,19 @@ _sessions: dict[tuple[str, str], subprocess.Popen] = {}
 _lock = threading.Lock()
 
 
+def _slug(text: str) -> str:
+    """Sanitize user-controlled names for filenames."""
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", text).strip("._") or "untitled"
+
+
 def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
     """Assemble the claude CLI invocation."""
     cmd = [cfg.claude_command, "--dangerously-skip-permissions",
            "--output-format", "stream-json", "--verbose"]
-    if cfg.mcp_config and Path(cfg.mcp_config).exists():
-        cmd += ["--mcp-config", str(Path(cfg.mcp_config).resolve())]
-    if cfg.system_prompt and Path(cfg.system_prompt).exists():
-        cmd += ["--append-system-prompt", Path(cfg.system_prompt).read_text()]
+    if cfg.mcp_config.exists():
+        cmd += ["--mcp-config", str(cfg.mcp_config.resolve())]
+    if cfg.system_prompt.exists():
+        cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
     cmd += ["-p", f"Call set_context('{stream}', '{topic}') to begin, "
                    f"then greet the user and listen for follow-ups."]
     return cmd
@@ -69,7 +66,7 @@ def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
 def _build_env(cfg: Config, msg: dict) -> dict:
     """Set env vars that zulipmcp reads on the other side."""
     env = os.environ.copy()
-    env["ZULIP_RC_PATH"] = str(Path(cfg.zuliprc).resolve())
+    env["ZULIP_RC_PATH"] = str(cfg.zuliprc.resolve())
     env["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] = "10800000"  # 3 hours
     env["TRIGGER_MESSAGE_ID"] = str(msg["id"])
     env["SESSION_USER_EMAIL"] = msg.get("sender_email", "")
@@ -86,9 +83,9 @@ def _spawn(cfg: Config, msg: dict):
         if p and p.poll() is None:
             return  # session alive
 
-    Path(cfg.log_dir).mkdir(parents=True, exist_ok=True)
+    cfg.log_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
-    log_path = Path(cfg.log_dir) / f"{ts}_{key[0]}_{key[1]}.jsonl"
+    log_path = cfg.log_dir / f"{ts}_{_slug(key[0])}_{_slug(key[1])}.jsonl"
     fh = open(log_path, "w")
 
     proc = subprocess.Popen(
@@ -111,7 +108,11 @@ def _spawn(cfg: Config, msg: dict):
 
 def run(cfg: Config):
     """Block forever, dispatching @mentions to _spawn()."""
-    client = zulip.Client(config_file=cfg.zuliprc)
+    if not cfg.zuliprc.exists():
+        raise FileNotFoundError(
+            f"Zulip config not found: {cfg.zuliprc} (expected .zuliprc in the current working directory)"
+        )
+    client = zulip.Client(config_file=str(cfg.zuliprc))
     me = client.get_profile()["user_id"]
     print(f"[listener] Listening as user_id={me}, log_dir={cfg.log_dir}", file=sys.stderr)
 
@@ -130,9 +131,18 @@ def main():
         description="Zulip → Claude Code listener",
         epilog="See zulipmcp README for full setup instructions.",
     )
-    p.add_argument("--zuliprc", required=True, help="Path to .zuliprc")
-    p.add_argument("--mcp-config", default="", help="Path to .mcp.json for Claude")
-    p.add_argument("--system-prompt", default="", help="Path to system prompt file")
+    p.add_argument("--zuliprc", default=".zuliprc",
+                   help="Path to .zuliprc (default: ./.zuliprc)")
+    p.add_argument("--mcp-config", default=".mcp.json",
+                   help="Path to .mcp.json for Claude (default: ./.mcp.json if present)")
+    p.add_argument(
+        "--system-prompt",
+        default=str(DEFAULT_SYSTEM_PROMPT_PATH),
+        help=(
+            "Path to system prompt file "
+            f"(default: {DEFAULT_SYSTEM_PROMPT_PATH.name} bundled with zulipmcp)"
+        ),
+    )
     p.add_argument("--working-dir", default=".", help="Working directory for sessions")
     p.add_argument("--claude-command", default="claude", help="Claude CLI binary name")
     p.add_argument("--log-dir", default="./logs", help="Session log directory")
