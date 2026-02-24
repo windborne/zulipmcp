@@ -831,6 +831,49 @@ def edit_message(message_id: int, content: str) -> str:
 
 
 @mcp.tool()
+def move_messages(message_id: int, topic: str, stream: str = "",
+                  propagate_mode: str = "change_one") -> str:
+    """Move message(s) to a different topic and/or stream.
+
+    Moves one or more messages by changing their topic and optionally their
+    stream/channel. Notifications are always sent to both the old and new
+    threads so users can see where messages went.
+
+    Before calling, confirm the exact source and destination with the user
+    using clickable Zulip links to avoid mistakes.
+
+    Args:
+        message_id: The anchor message ID to move. For change_later/change_all,
+            this determines the starting point.
+        topic: Destination topic name. Will be auto-created if it doesn't exist.
+        stream: Destination stream name. Only needed for cross-channel moves.
+            Leave empty to move within the same stream.
+        propagate_mode: Which messages to move:
+            - "change_one": Only the specified message (default).
+            - "change_later": The specified message and all after it in the topic.
+            - "change_all": All messages in the source topic.
+
+    Returns:
+        Confirmation or error message.
+    """
+    valid_modes = ("change_one", "change_later", "change_all")
+    if propagate_mode not in valid_modes:
+        return f"Error: propagate_mode must be one of {valid_modes}, got '{propagate_mode}'"
+    result = zulip_core.move_messages(
+        message_id, topic, stream=stream or None, propagate_mode=propagate_mode,
+    )
+    if result.get("result") != "success":
+        return f"Error moving message(s): {result.get('msg', 'Unknown error')}"
+    mode_desc = {
+        "change_one": "1 message",
+        "change_later": "message and all following",
+        "change_all": "all messages in topic",
+    }
+    dest = f"#{stream} > {topic}" if stream else topic
+    return f"Moved {mode_desc[propagate_mode]} to {dest}."
+
+
+@mcp.tool()
 def list_emoji(query: str = "") -> str:
     """Search custom emoji available on this Zulip server.
 
