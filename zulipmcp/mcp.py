@@ -462,17 +462,20 @@ def _stop_typing_safe():
             pass
 
 
+_DEFAULT_FAREWELL = ":wave: Signing off"
+
+
 @mcp.tool()
-def end_session(message: str = "") -> str:
+def end_session(message: str = _DEFAULT_FAREWELL) -> str:
     """End the current session gracefully.
     Writes a clean exit marker so the listener knows this was intentional.
 
-    If a message is provided, it is posted as a farewell (with session duration
-    appended). If omitted, the session ends silently.
+    Posts a farewell message with session duration appended. Pass an empty
+    string to end silently without posting anything.
 
     Args:
-        message: Optional farewell message to post before ending.
-            If empty, the session ends without posting anything.
+        message: Farewell message to post before ending.
+            Defaults to ":wave: Signing off". Pass "" for a silent exit.
 
     Returns:
         Confirmation that the session has ended.
@@ -489,7 +492,7 @@ def end_session(message: str = "") -> str:
 
     stream, topic = _session.stream, _session.topic
 
-    # Post farewell if message provided
+    # Post farewell (default: ":wave: Signing off | {duration}")
     if message and stream and topic:
         duration_secs = int(time.time() - _session.started_at) if _session.started_at else 0
         duration_str = f"{duration_secs}s" if duration_secs < 60 else f"{duration_secs // 60}m"
