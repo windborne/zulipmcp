@@ -670,7 +670,6 @@ def remove_reaction(message_id: int, emoji_name: str) -> dict:
     return get_client().remove_reaction({
         "message_id": message_id,
         "emoji_name": emoji_name,
-        "reaction_type": "realm_emoji",
     })
 
 
