@@ -670,7 +670,6 @@ def remove_reaction(message_id: int, emoji_name: str) -> dict:
     return get_client().remove_reaction({
         "message_id": message_id,
         "emoji_name": emoji_name,
-        "reaction_type": "realm_emoji",
     })
 
 
@@ -680,6 +679,38 @@ def edit_message(message_id: int, content: str) -> dict:
         "message_id": message_id,
         "content": content,
     })
+
+
+def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
+                  propagate_mode: str = "change_one") -> dict:
+    """Move message(s) to a different topic and/or stream.
+
+    Uses the Zulip update_message API with topic/stream_id params.
+    Notifications are always sent to both old and new threads.
+
+    Args:
+        message_id: The anchor message to move.
+        topic: Destination topic name.
+        stream: Destination stream name (optional, only for cross-channel moves).
+        propagate_mode: "change_one", "change_later", or "change_all".
+
+    Returns:
+        API result dict.
+    """
+    request: dict = {
+        "message_id": message_id,
+        "topic": topic,
+        "propagate_mode": propagate_mode,
+        "send_notification_to_old_thread": True,
+        "send_notification_to_new_thread": True,
+    }
+    if stream:
+        client = get_client()
+        result = client.get_stream_id(stream)
+        if result["result"] != "success":
+            return result
+        request["stream_id"] = result["stream_id"]
+    return get_client().update_message(request)
 
 
 _stream_id_cache: dict[str, int] = {}
