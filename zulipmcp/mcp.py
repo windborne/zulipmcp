@@ -54,6 +54,12 @@ PRIVATE_STREAM_ERROR = (
     "You can only access the private stream where you were pinged."
 )
 
+PRIVATE_STREAM_NOT_INVITED_ERROR = (
+    "I don't have access to this private stream. "
+    "To use me here, a stream admin needs to invite me first. "
+    "You can do this from the stream settings → Subscribers → add the bot."
+)
+
 
 def _reject_if_private(stream: str) -> str | None:
     """Return an error string if the stream is private, None otherwise."""
@@ -356,9 +362,15 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
 
         # Subscribe to the stream so the narrowed queue works.
         if not zulip_core.ensure_subscribed(_session.stream):
+            # Send a clear message directly to the user — the bot can post
+            # even to streams it can't read from.
+            zulip_core.send_message(
+                _session.stream, _session.topic,
+                PRIVATE_STREAM_NOT_INVITED_ERROR,
+            )
             return (
-                "Error: Bot is not subscribed to this private stream and "
-                "cannot auto-subscribe. Add the bot to the stream first."
+                "STOP: The bot cannot read messages in this private stream. "
+                "A user-facing error has been posted. End the session now."
             )
 
         # Register event queue narrowed to this stream+topic.

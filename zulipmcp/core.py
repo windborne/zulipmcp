@@ -1108,20 +1108,28 @@ def upload_file(file_path: str) -> tuple[str, str]:
 # Event queue — long-polling for real-time message delivery
 # ============================================================================
 
-def ensure_subscribed(stream: str) -> bool:
-    """Subscribe the bot to a public stream. No-op if already subscribed.
-
-    Returns True on success, False if the stream is private and the bot
-    isn't already a member.
-    """
-    if is_stream_private(stream):
-        # Check if already subscribed
-        result = get_client().get_subscriptions()
-        if result.get("result") == "success":
-            for sub in result.get("subscriptions", []):
-                if sub["name"].lower() == stream.lower():
-                    return True
+def is_bot_subscribed(stream: str) -> bool:
+    """Check if the bot is currently subscribed to a stream."""
+    result = get_client().get_subscriptions()
+    if result.get("result") != "success":
         return False
+    return any(sub["name"].lower() == stream.lower()
+               for sub in result.get("subscriptions", []))
+
+
+def ensure_subscribed(stream: str) -> bool:
+    """Subscribe the bot to a stream. No-op if already subscribed.
+
+    For public streams, auto-subscribes. For private streams (or streams
+    the bot can't see), returns True only if already subscribed.
+    """
+    # Fast path: already subscribed
+    if is_bot_subscribed(stream):
+        return True
+    # Private streams can't be joined — must be invited
+    if is_stream_private(stream):
+        return False
+    # Try to subscribe (works for public streams)
     result = get_client().add_subscriptions(
         streams=[{"name": stream}],
     )
