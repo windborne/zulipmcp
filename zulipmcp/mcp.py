@@ -186,13 +186,6 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
             _session.last_seen_message_id = trigger_id
         except (ValueError, TypeError):
             trigger_id = None
-        if trigger_id is not None:
-            # Auto-react :eyes: on the trigger message — instant "I saw this" signal
-            try:
-                zulip_core.add_reaction(trigger_id, "eyes")
-            except Exception:
-                pass
-
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
     header = f"Session context set to {visibility} #{stream} > {topic}"
 

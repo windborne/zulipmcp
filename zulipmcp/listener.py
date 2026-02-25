@@ -121,6 +121,10 @@ def run(cfg: Config):
         if (msg.get("type") == "stream"
                 and "mentioned" in event.get("flags", [])
                 and msg.get("sender_id") != me):
+            try:
+                client.add_reaction({"message_id": msg["id"], "emoji_name": "eyes"})
+            except Exception:
+                pass
             _spawn(cfg, msg)
 
     client.call_on_each_event(handle, event_types=["message"])
