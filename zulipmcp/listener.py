@@ -21,6 +21,12 @@ import zulip
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_SYSTEM_PROMPT_PATH = PACKAGE_DIR / "default_system_prompt.md"
 
+PRIVATE_STREAM_NOT_INVITED = (
+    "I don't have access to this private stream. "
+    "To use me here, a stream admin needs to invite me first. "
+    "You can do this from the stream settings \u2192 Subscribers \u2192 add the bot."
+)
+
 
 @dataclass
 class Config:
@@ -116,11 +122,40 @@ def run(cfg: Config):
     me = client.get_profile()["user_id"]
     print(f"[listener] Listening as user_id={me}, log_dir={cfg.log_dir}", file=sys.stderr)
 
+    def _is_subscribed(stream_name: str) -> bool:
+        """Check if the bot is subscribed to a stream."""
+        result = client.get_subscriptions()
+        if result.get("result") != "success":
+            return False
+        return any(
+            sub["name"].lower() == stream_name.lower()
+            for sub in result.get("subscriptions", [])
+        )
+
     def handle(event):
         msg = event["message"]
         if (msg.get("type") == "stream"
                 and "mentioned" in event.get("flags", [])
                 and msg.get("sender_id") != me):
+            stream = msg["display_recipient"]
+            topic = msg["subject"]
+
+            # If the bot isn't subscribed, it can't read messages in this
+            # stream (private stream it wasn't invited to).  Send a canned
+            # error and skip spawning a session — no LLM needed.
+            if not _is_subscribed(stream):
+                try:
+                    client.send_message({
+                        "type": "stream",
+                        "to": stream,
+                        "topic": topic,
+                        "content": PRIVATE_STREAM_NOT_INVITED,
+                    })
+                except Exception as e:
+                    print(f"[listener] Failed to send private-stream error to #{stream} > {topic}: {e}",
+                          file=sys.stderr)
+                return
+
             try:
                 client.add_reaction({"message_id": msg["id"], "emoji_name": "eyes"})
             except Exception:
