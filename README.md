@@ -77,9 +77,9 @@ The listener is deliberately minimal (~90 lines of code). It omits concurrency c
 
 ### Listening for messages
 
-The `listen` tool polls for new messages every 2 seconds using `fetch_new_messages`, which queries the Zulip API for messages strictly after the last seen message ID (using `include_anchor: False`). The bot's own messages are filtered out by user ID so it doesn't react to itself.
+The `listen` tool uses Zulip's [real-time events API](https://zulip.com/api/real-time-events) (long-polling) instead of repeated `GET /messages` calls. On entry it catches up on any messages since `last_seen_message_id`, subscribes the bot to the stream if needed, registers a narrowed event queue for the stream/topic, and then long-polls via `GET /events`. The server blocks until a message arrives or ~90 seconds elapse (heartbeat), making this ~30x more efficient than polling every 2 seconds. If the queue expires (`BAD_EVENT_QUEUE_ID`), it re-registers automatically. The queue is deleted in a `finally` block on exit.
 
-While listening, a `robot_ear` emoji is added to the last message as a visual indicator and removed when listening stops (via a `finally` block, so it always cleans up). Heartbeat pings are sent to the MCP client every 10 seconds via `ctx.info()` to keep the connection alive during long polls.
+A `robot_ear` emoji is added to the last message as a visual indicator while listening and removed when listening stops. MCP keepalive pings are sent via `ctx.info()` after each long-poll cycle.
 
 ### No missed messages on reply
 
