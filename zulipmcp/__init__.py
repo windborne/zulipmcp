@@ -35,4 +35,8 @@ from .core import (
     download_file,
     save_file,
     save_image,
+    ensure_subscribed,
+    register_event_queue,
+    get_events,
+    delete_event_queue,
 )

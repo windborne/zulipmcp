@@ -1102,3 +1102,95 @@ def upload_file(file_path: str) -> tuple[str, str]:
         raise ValueError(f"Upload failed: {result.get('msg', 'Unknown error')}")
 
     return result["uri"], path.name
+
+
+# ============================================================================
+# Event queue — long-polling for real-time message delivery
+# ============================================================================
+
+def ensure_subscribed(stream: str) -> bool:
+    """Subscribe the bot to a public stream. No-op if already subscribed.
+
+    Returns True on success, False if the stream is private and the bot
+    isn't already a member.
+    """
+    if is_stream_private(stream):
+        # Check if already subscribed
+        result = get_client().get_subscriptions()
+        if result.get("result") == "success":
+            for sub in result.get("subscriptions", []):
+                if sub["name"].lower() == stream.lower():
+                    return True
+        return False
+    result = get_client().add_subscriptions(
+        streams=[{"name": stream}],
+    )
+    return result.get("result") == "success"
+
+
+def register_event_queue(stream: str, topic: str) -> tuple[str, int, int]:
+    """Register an event queue narrowed to a stream/topic.
+
+    Returns (queue_id, last_event_id, longpoll_timeout_seconds).
+    Raises ValueError on failure.
+    """
+    result = get_client().call_endpoint(
+        url="/register",
+        method="POST",
+        request={
+            "event_types": json.dumps(["message"]),
+            "narrow": json.dumps([
+                ["channel", stream],
+                ["topic", topic],
+            ]),
+            "apply_markdown": False,
+        },
+    )
+    if result.get("result") != "success":
+        raise ValueError(f"Failed to register event queue: {result.get('msg', '')}")
+    timeout = result.get("event_queue_longpoll_timeout_seconds", 90)
+    return result["queue_id"], result["last_event_id"], timeout
+
+
+def get_events(queue_id: str, last_event_id: int,
+               longpoll_timeout: int = 90) -> tuple[list[dict], int]:
+    """Long-poll for events. Blocks until events arrive or server heartbeat.
+
+    Returns (messages, new_last_event_id). Messages list may be empty
+    (heartbeat only). Raises ValueError on BAD_EVENT_QUEUE_ID (caller
+    should re-register).
+    """
+    result = get_client().call_endpoint(
+        url="/events",
+        method="GET",
+        request={
+            "queue_id": queue_id,
+            "last_event_id": last_event_id,
+        },
+        timeout=longpoll_timeout + 30,  # HTTP timeout > server timeout
+    )
+    if result.get("result") != "success":
+        code = result.get("code", "")
+        if code == "BAD_EVENT_QUEUE_ID":
+            raise ValueError("BAD_EVENT_QUEUE_ID")
+        raise ValueError(f"get_events failed: {result.get('msg', '')}")
+    events = result.get("events", [])
+    messages = []
+    new_last = last_event_id
+    for ev in events:
+        new_last = max(new_last, ev.get("id", new_last))
+        if ev.get("type") == "message":
+            messages.append(ev["message"])
+    return messages, new_last
+
+
+def delete_event_queue(queue_id: str) -> None:
+    """Delete an event queue. Ignores errors (best-effort cleanup)."""
+    try:
+        get_client().call_endpoint(
+            url="/events",
+            method="DELETE",
+            request={"queue_id": queue_id},
+        )
+    except Exception:
+        pass

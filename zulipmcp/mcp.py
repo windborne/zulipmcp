@@ -292,24 +292,35 @@ def reply(content: str) -> str:
     return response
 
 
+def _build_listen_response(visible_messages: list[dict],
+                           listen_msg_id: Optional[int]) -> str:
+    """Format listen() return value with reaction summary + new messages."""
+    reaction_lines = []
+    for check_id in dict.fromkeys([listen_msg_id, _session.last_sent_message_id]):
+        if check_id:
+            line = zulip_core.check_reactions_on(check_id)
+            if line:
+                reaction_lines.append(line)
+    output = ""
+    if reaction_lines:
+        output += "\n".join(reaction_lines) + "\n\n"
+    output += "New messages:\n\n" + zulip_core.format_messages(visible_messages)
+    return output
+
+
 @mcp.tool()
 async def listen(timeout_hours: float, ctx: Context) -> str:
     """Wait for new messages in the current conversation (blocking).
 
-    Blocks until a new message arrives or the timeout expires.
-    Default to 1 hour. Use longer timeouts for follow-up waits.
-
-    Note: Messages in /nobots (or /nb) topics or starting with /nobots (or /nb) are automatically
-    filtered and will not trigger a return from this function.
+    Uses Zulip's real-time events API (long-polling) instead of repeated
+    GET /messages calls — ~30x fewer API calls.
 
     Args:
         timeout_hours: Max wait time in hours. Default to 1.
     """
-    listen_id = f"listen_{int(time.time())}_{os.getpid()}"
-    _logger.info(f"[{listen_id}] listen() START: timeout_hours={timeout_hours}, stream={_session.stream}, topic={_session.topic}")
+    _logger.info(f"listen() START: timeout={timeout_hours}h, stream={_session.stream}")
 
     if not _session.active or not _session.stream or not _session.topic:
-        _logger.warning(f"[{listen_id}] No session context set")
         return "Error: No session context set. Call set_context first."
 
     # Auto-stop typing — agent is just waiting, not working.
@@ -319,102 +330,98 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
         pass
 
     timeout_seconds = timeout_hours * 3600
-
-    # Save the message ID before the loop — the session field gets updated
-    # when new messages arrive, so we need the original to remove the emoji.
     listen_msg_id = _session.last_seen_message_id
-    _logger.debug(f"[{listen_id}] Starting from message_id={listen_msg_id}")
 
     # Add listening indicator
     if listen_msg_id:
         try:
             zulip_core.add_reaction(listen_msg_id, "robot_ear")
-            _logger.debug(f"[{listen_id}] Added robot_ear reaction")
-        except Exception as e:
-            _logger.warning(f"[{listen_id}] Failed to add reaction: {e}")
+        except Exception:
+            pass
 
+    queue_id = None
     try:
-        start = time.time()
-        end = start + timeout_seconds
-        last_heartbeat = start
-        iteration = 0
+        # Catch up on any messages that arrived since last_seen before
+        # registering the queue (the queue only delivers future events).
+        if _session.last_seen_message_id:
+            catchup = zulip_core.fetch_new_messages(
+                _session.stream, _session.topic,
+                _session.last_seen_message_id, _session.my_user_id,
+            )
+            if catchup:
+                _session.last_seen_message_id = catchup[-1]["id"]
+                visible = zulip_core.filter_for_bot(catchup)
+                if visible:
+                    return _build_listen_response(visible, listen_msg_id)
 
-        while time.time() < end:
-            iteration += 1
+        # Subscribe to the stream so the narrowed queue works.
+        if not zulip_core.ensure_subscribed(_session.stream):
+            return (
+                "Error: Bot is not subscribed to this private stream and "
+                "cannot auto-subscribe. Add the bot to the stream first."
+            )
+
+        # Register event queue narrowed to this stream+topic.
+        queue_id, last_event_id, longpoll_timeout = zulip_core.register_event_queue(
+            _session.stream, _session.topic,
+        )
+        _logger.info(f"listen() registered queue={queue_id}, longpoll_timeout={longpoll_timeout}s")
+
+        start = time.time()
+        deadline = start + timeout_seconds
+        loop = asyncio.get_event_loop()
+
+        while time.time() < deadline:
+            # Long-poll in a thread so we can interleave MCP keepalives.
+            remaining = deadline - time.time()
+            poll_timeout = min(longpoll_timeout, max(int(remaining), 1))
+
             try:
-                messages = zulip_core.fetch_new_messages(
-                    _session.stream, _session.topic,
-                    _session.last_seen_message_id, _session.my_user_id,
+                messages, last_event_id = await loop.run_in_executor(
+                    None, zulip_core.get_events, queue_id, last_event_id, poll_timeout,
                 )
-            except Exception as e:
-                _logger.error(f"[{listen_id}] iter={iteration} fetch_new_messages EXCEPTION: {type(e).__name__}: {e}")
+            except ValueError as e:
+                if "BAD_EVENT_QUEUE_ID" in str(e):
+                    _logger.warning("listen() queue expired, re-registering")
+                    queue_id, last_event_id, longpoll_timeout = zulip_core.register_event_queue(
+                        _session.stream, _session.topic,
+                    )
+                    continue
                 raise
 
-            # Update last_seen_id from raw messages (before filtering) so we don't
-            # re-fetch hidden messages on the next poll
+            # Filter own messages and /nobots
+            messages = [m for m in messages if m.get("sender_id") != _session.my_user_id]
             if messages:
                 _session.last_seen_message_id = messages[-1]["id"]
+            visible = zulip_core.filter_for_bot(messages)
+            if visible:
+                _logger.info(f"listen() got {len(visible)} messages, returning")
+                return _build_listen_response(visible, listen_msg_id)
 
-            # Filter out /nobots and /nb messages before checking if we have anything to show
-            visible_messages = zulip_core.filter_for_bot(messages)
-            if visible_messages:
-                _logger.info(f"[{listen_id}] iter={iteration} GOT {len(visible_messages)} visible messages (of {len(messages)} total), returning")
-
-                # Check for reactions on recent messages before returning
-                reaction_lines = []
-                for check_id in dict.fromkeys([listen_msg_id, _session.last_sent_message_id]):
-                    if check_id:
-                        line = zulip_core.check_reactions_on(check_id)
-                        if line:
-                            reaction_lines.append(line)
-
-                output = ""
-                if reaction_lines:
-                    output += "\n".join(reaction_lines) + "\n\n"
-                output += "New messages:\n\n" + zulip_core.format_messages(visible_messages)
-                return output
-
-            now = time.time()
-            if now - last_heartbeat >= 10:
-                elapsed = int(now - start)
-                _logger.debug(f"[{listen_id}] iter={iteration} heartbeat elapsed={elapsed}s")
-                # Use ctx.info() as keep-alive — report_progress is a no-op
-                # when the client doesn't send a progressToken, which causes
-                # the MCP connection to timeout during long polls.
-                try:
-                    await ctx.info(f"Listening… {elapsed}s elapsed")
-                    await ctx.report_progress(progress=elapsed, total=timeout_seconds)
-                except Exception as e:
-                    _logger.error(f"[{listen_id}] iter={iteration} ctx.info/report_progress EXCEPTION: {type(e).__name__}: {e}")
-                    raise
-                last_heartbeat = now
-
+            # MCP keepalive
+            elapsed = int(time.time() - start)
             try:
-                await asyncio.sleep(2)
-            except asyncio.CancelledError:
-                _logger.warning(f"[{listen_id}] iter={iteration} asyncio.CancelledError during sleep")
-                raise
-            except Exception as e:
-                _logger.error(f"[{listen_id}] iter={iteration} asyncio.sleep EXCEPTION: {type(e).__name__}: {e}")
+                await ctx.info(f"Listening… {elapsed}s elapsed")
+                await ctx.report_progress(progress=elapsed, total=timeout_seconds)
+            except Exception:
                 raise
 
-        _logger.info(f"[{listen_id}] TIMEOUT after {timeout_hours} hours, iter={iteration}")
         return (
             f"Timeout: No new messages after {timeout_hours} hours.\n\n"
             "If the task seems done, write a session summary and end_session(). "
             "Otherwise, send a contextual check-in and listen again."
         )
     except Exception as e:
-        _logger.error(f"[{listen_id}] UNHANDLED EXCEPTION in listen loop: {type(e).__name__}: {e}", exc_info=True)
+        _logger.error(f"listen() exception: {type(e).__name__}: {e}", exc_info=True)
         raise
     finally:
-        _logger.info(f"[{listen_id}] listen() FINALLY block executing")
+        if queue_id:
+            zulip_core.delete_event_queue(queue_id)
         if listen_msg_id:
             try:
                 zulip_core.remove_reaction(listen_msg_id, "robot_ear")
-                _logger.debug(f"[{listen_id}] Removed robot_ear reaction")
-            except Exception as e:
-                _logger.warning(f"[{listen_id}] Failed to remove reaction: {e}")
+            except Exception:
+                pass
 
 
 def _write_exit_markers():
