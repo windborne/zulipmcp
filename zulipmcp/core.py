@@ -17,6 +17,7 @@ _cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
     Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
+_dismiss_emoji: set[str] = {"stop_sign"}
 
 
 def _allowed_private_streams() -> set[str]:
@@ -65,6 +66,75 @@ def set_ignored_streams(streams: set[str]) -> None:
 def get_ignored_streams() -> set[str]:
     """Return the current ignored streams set."""
     return _ignored_streams
+
+
+def set_dismiss_emoji(emoji: set[str] | str) -> None:
+    """Set the emoji names that trigger session dismissal when reacted.
+
+    Pass an empty set to disable dismiss-by-reaction.
+    """
+    global _dismiss_emoji
+    if isinstance(emoji, str):
+        emoji = {emoji}
+    _dismiss_emoji = {e.strip(":") for e in emoji if e.strip(":")}
+
+
+def get_dismiss_emoji() -> set[str]:
+    """Return the current dismiss emoji set."""
+    return _dismiss_emoji
+
+
+def is_dismiss_reaction(event: dict, bot_user_id: int,
+                        stream: Optional[str] = None,
+                        topic: Optional[str] = None) -> bool:
+    """Check if a reaction event is a dismiss signal on a bot-authored message.
+
+    Returns True if:
+    - The reaction is an "add" operation
+    - The emoji matches a dismiss emoji
+    - The reactor is not the bot itself
+    - The reacted-on message was sent by the bot
+    - The reacted-on message is in the given stream/topic (if specified)
+
+    The last checks require one API call to fetch the message.
+
+    Note: Zulip's event queue narrow does NOT filter reaction events, so
+    the caller receives reactions from all streams.  Pass stream/topic to
+    ensure only reactions in the current conversation trigger dismissal.
+    """
+    if event.get("op") != "add":
+        return False
+    if event.get("emoji_name") not in _dismiss_emoji:
+        return False
+    if event.get("user_id") == bot_user_id:
+        return False
+
+    # Verify the reacted-on message was sent by this bot (and optionally
+    # that it belongs to the expected stream/topic).
+    msg_id = event.get("message_id")
+    if not msg_id:
+        return False
+    try:
+        result = get_client().call_endpoint(
+            url=f"/messages/{msg_id}",
+            method="GET",
+        )
+        if result.get("result") != "success":
+            return False
+        msg = result.get("message", {})
+        if msg.get("sender_id") != bot_user_id:
+            return False
+        # Verify stream/topic if provided.
+        # display_recipient is a string for stream messages but a list for DMs.
+        display_recipient = msg.get("display_recipient", "")
+        if stream:
+            if not isinstance(display_recipient, str) or display_recipient.lower() != stream.lower():
+                return False
+        if topic and msg.get("subject", "").lower() != topic.lower():
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def is_stream_private(stream_name: str) -> bool:
@@ -1146,7 +1216,7 @@ def register_event_queue(stream: str, topic: str) -> tuple[str, int, int]:
         url="/register",
         method="POST",
         request={
-            "event_types": json.dumps(["message"]),
+            "event_types": json.dumps(["message", "reaction"]),
             "narrow": json.dumps([
                 ["channel", stream],
                 ["topic", topic],
@@ -1161,10 +1231,10 @@ def register_event_queue(stream: str, topic: str) -> tuple[str, int, int]:
 
 
 def get_events(queue_id: str, last_event_id: int,
-               longpoll_timeout: int = 90) -> tuple[list[dict], int]:
+               longpoll_timeout: int = 90) -> tuple[list[dict], list[dict], int]:
     """Long-poll for events. Blocks until events arrive or server heartbeat.
 
-    Returns (messages, new_last_event_id). Messages list may be empty
+    Returns (messages, reactions, new_last_event_id). Lists may be empty
     (heartbeat only). Raises ValueError on BAD_EVENT_QUEUE_ID (caller
     should re-register).
     """
@@ -1184,12 +1254,15 @@ def get_events(queue_id: str, last_event_id: int,
         raise ValueError(f"get_events failed: {result.get('msg', '')}")
     events = result.get("events", [])
     messages = []
+    reactions = []
     new_last = last_event_id
     for ev in events:
         new_last = max(new_last, ev.get("id", new_last))
         if ev.get("type") == "message":
             messages.append(ev["message"])
-    return messages, new_last
+        elif ev.get("type") == "reaction":
+            reactions.append(ev)
+    return messages, reactions, new_last
 
 
 def delete_event_queue(queue_id: str) -> None:
