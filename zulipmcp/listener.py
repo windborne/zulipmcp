@@ -132,6 +132,21 @@ def run(cfg: Config):
             for sub in result.get("subscriptions", [])
         )
 
+    def _is_stream_private(stream_name: str) -> bool:
+        """Check if a stream is private (invite_only) via the Zulip API."""
+        result = client.get_streams(include_public=True, include_subscribed=True)
+        if result.get("result") != "success":
+            return False  # can't determine — assume public
+        for s in result.get("streams", []):
+            if s["name"].lower() == stream_name.lower():
+                return s.get("invite_only", False)
+        return False  # stream not found — let it fail downstream
+
+    def _ensure_subscribed(stream_name: str) -> bool:
+        """Subscribe the bot to a public stream. Returns True on success."""
+        result = client.add_subscriptions(streams=[{"name": stream_name}])
+        return result.get("result") == "success"
+
     def handle(event):
         msg = event["message"]
         if (msg.get("type") == "stream"
@@ -140,21 +155,26 @@ def run(cfg: Config):
             stream = msg["display_recipient"]
             topic = msg["subject"]
 
-            # If the bot isn't subscribed, it can't read messages in this
-            # stream (private stream it wasn't invited to).  Send a canned
-            # error and skip spawning a session — no LLM needed.
             if not _is_subscribed(stream):
-                try:
-                    client.send_message({
-                        "type": "stream",
-                        "to": stream,
-                        "topic": topic,
-                        "content": PRIVATE_STREAM_NOT_INVITED,
-                    })
-                except Exception as e:
-                    print(f"[listener] Failed to send private-stream error to #{stream} > {topic}: {e}",
-                          file=sys.stderr)
-                return
+                if _is_stream_private(stream):
+                    # Private stream the bot wasn't invited to — send error
+                    try:
+                        client.send_message({
+                            "type": "stream",
+                            "to": stream,
+                            "topic": topic,
+                            "content": PRIVATE_STREAM_NOT_INVITED,
+                        })
+                    except Exception as e:
+                        print(f"[listener] Failed to send private-stream error to #{stream} > {topic}: {e}",
+                              file=sys.stderr)
+                    return
+
+                # Public stream — auto-subscribe so the session can read/listen
+                if _ensure_subscribed(stream):
+                    print(f"[listener] Auto-subscribed to public stream #{stream}", file=sys.stderr)
+                else:
+                    print(f"[listener] Failed to auto-subscribe to #{stream}", file=sys.stderr)
 
             try:
                 client.add_reaction({"message_id": msg["id"], "emoji_name": "eyes"})
