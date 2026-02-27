@@ -71,6 +71,7 @@ _hooks: dict = {
     "on_session_end": None,   # (session_state) -> None : called when end_session() runs
     "on_set_context": None,   # (stream, topic) -> str : extra text appended to set_context response
     "on_reply": None,         # (sent_message_id, content) -> None : called after reply()
+    "dismiss_emoji": None,    # set[str] : emoji names that trigger session dismiss (default: {"stop_sign"})
 }
 
 
@@ -90,10 +91,15 @@ def configure(**kwargs):
             (e.g. custom instructions, prompts).
         on_reply: callable(sent_message_id: int, content: str) -> None
             Called after a reply is successfully sent.
+        dismiss_emoji: set[str]
+            Emoji names that trigger session dismiss via reaction.
+            Default: {"stop_sign"}. Pass a set to override/extend.
     """
     for key, value in kwargs.items():
         if key not in _hooks:
             raise ValueError(f"Unknown hook: {key!r}. Valid hooks: {list(_hooks.keys())}")
+        if key == "dismiss_emoji":
+            zulip_core.set_dismiss_emoji(value)
         _hooks[key] = value
 
 
@@ -244,6 +250,21 @@ def reply(content: str) -> str:
         _logger.warning("reply() called with no session context")
         return "Error: No session context set. Call set_context first."
 
+    # Check if user already reacted to dismiss while we were working.
+    # This catches the race condition where the user reacts during tool
+    # execution (not during listen()), so the reaction event was never seen.
+    if _session.last_sent_message_id and _session.my_user_id:
+        dismissed_emoji = zulip_core.check_dismissed(
+            _session.last_sent_message_id, _session.my_user_id,
+        )
+        if dismissed_emoji:
+            _logger.info(f"reply() found pre-existing dismiss :{dismissed_emoji}: on msg {_session.last_sent_message_id}")
+            return (
+                f"Session dismissed: a user reacted with :{dismissed_emoji}: on your message "
+                f"(msg {_session.last_sent_message_id}) while you were working. "
+                "Do NOT send your reply. End the session gracefully by calling end_session(\"\")."
+            )
+
     # Check for missed messages before sending
     missed = []
     if _session.last_seen_message_id:
@@ -341,6 +362,19 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
 
     queue_id = None
     try:
+        # Check if user already reacted to dismiss while we were working.
+        if _session.last_sent_message_id and _session.my_user_id:
+            dismissed_emoji = zulip_core.check_dismissed(
+                _session.last_sent_message_id, _session.my_user_id,
+            )
+            if dismissed_emoji:
+                _logger.info(f"listen() found pre-existing dismiss :{dismissed_emoji}: on msg {_session.last_sent_message_id}")
+                return (
+                    f"Session dismissed: a user reacted with :{dismissed_emoji}: on your message "
+                    f"(msg {_session.last_sent_message_id}) while you were working. "
+                    "End the session gracefully by calling end_session(\"\")."
+                )
+
         # Catch up on any messages that arrived since last_seen before
         # registering the queue (the queue only delivers future events).
         if _session.last_seen_message_id:
@@ -373,7 +407,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             poll_timeout = min(longpoll_timeout, max(int(remaining), 1))
 
             try:
-                messages, last_event_id = await loop.run_in_executor(
+                messages, reactions, last_event_id = await loop.run_in_executor(
                     None, zulip_core.get_events, queue_id, last_event_id, poll_timeout,
                 )
             except ValueError as e:
@@ -384,6 +418,16 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                     )
                     continue
                 raise
+
+            # Check for dismiss reaction (e.g. :stop_sign: on a bot message)
+            for r in reactions:
+                if zulip_core.is_dismiss_reaction(r, _session.my_user_id, _session.stream, _session.topic):
+                    emoji = r.get("emoji_name", "stop_sign")
+                    _logger.info(f"listen() dismissed via :{emoji}: reaction")
+                    return (
+                        f"Session dismissed: a user reacted with :{emoji}: on your message. "
+                        "End the session gracefully by calling end_session(\"\")."
+                    )
 
             # Filter own messages and /nobots
             messages = [m for m in messages if m.get("sender_id") != _session.my_user_id]

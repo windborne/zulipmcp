@@ -39,4 +39,8 @@ from .core import (
     register_event_queue,
     get_events,
     delete_event_queue,
+    set_dismiss_emoji,
+    get_dismiss_emoji,
+    is_dismiss_reaction,
+    check_dismissed,
 )
