@@ -250,6 +250,21 @@ def reply(content: str) -> str:
         _logger.warning("reply() called with no session context")
         return "Error: No session context set. Call set_context first."
 
+    # Check if user already reacted to dismiss while we were working.
+    # This catches the race condition where the user reacts during tool
+    # execution (not during listen()), so the reaction event was never seen.
+    if _session.last_sent_message_id and _session.my_user_id:
+        dismissed_emoji = zulip_core.check_dismissed(
+            _session.last_sent_message_id, _session.my_user_id,
+        )
+        if dismissed_emoji:
+            _logger.info(f"reply() found pre-existing dismiss :{dismissed_emoji}: on msg {_session.last_sent_message_id}")
+            return (
+                f"Session dismissed: a user reacted with :{dismissed_emoji}: on your message "
+                f"(msg {_session.last_sent_message_id}) while you were working. "
+                "Do NOT send your reply. End the session gracefully by calling end_session(\"\")."
+            )
+
     # Check for missed messages before sending
     missed = []
     if _session.last_seen_message_id:
@@ -347,6 +362,19 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
 
     queue_id = None
     try:
+        # Check if user already reacted to dismiss while we were working.
+        if _session.last_sent_message_id and _session.my_user_id:
+            dismissed_emoji = zulip_core.check_dismissed(
+                _session.last_sent_message_id, _session.my_user_id,
+            )
+            if dismissed_emoji:
+                _logger.info(f"listen() found pre-existing dismiss :{dismissed_emoji}: on msg {_session.last_sent_message_id}")
+                return (
+                    f"Session dismissed: a user reacted with :{dismissed_emoji}: on your message "
+                    f"(msg {_session.last_sent_message_id}) while you were working. "
+                    "End the session gracefully by calling end_session(\"\")."
+                )
+
         # Catch up on any messages that arrived since last_seen before
         # registering the queue (the queue only delivers future events).
         if _session.last_seen_message_id:

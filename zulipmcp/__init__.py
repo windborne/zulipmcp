@@ -42,4 +42,5 @@ from .core import (
     set_dismiss_emoji,
     get_dismiss_emoji,
     is_dismiss_reaction,
+    check_dismissed,
 )

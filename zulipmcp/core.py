@@ -17,7 +17,7 @@ _cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
     Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
-_dismiss_emoji: set[str] = {"stop_sign"}
+_dismiss_emoji: set[str] = {"stop_sign", "real-gun"}
 
 
 def _allowed_private_streams() -> set[str]:
@@ -135,6 +135,34 @@ def is_dismiss_reaction(event: dict, bot_user_id: int,
         return True
     except Exception:
         return False
+
+
+def check_dismissed(message_id: int, bot_user_id: int) -> Optional[str]:
+    """Check if a bot message already has a dismiss reaction.
+
+    Fetches the message via REST API and inspects its reactions list.
+    Returns the emoji name if a dismiss reaction from a non-bot user exists,
+    or None if no dismiss reaction is found.
+
+    This catches the race condition where a user reacts while the bot is
+    busy (not in listen()), so the reaction event was never consumed.
+    """
+    if not _dismiss_emoji:
+        return None
+    try:
+        result = get_client().call_endpoint(
+            url=f"/messages/{message_id}",
+            method="GET",
+        )
+        if result.get("result") != "success":
+            return None
+        msg = result.get("message", {})
+        for reaction in msg.get("reactions", []):
+            if reaction.get("emoji_name") in _dismiss_emoji and reaction.get("user_id") != bot_user_id:
+                return reaction["emoji_name"]
+        return None
+    except Exception:
+        return None
 
 
 def is_stream_private(stream_name: str) -> bool:
