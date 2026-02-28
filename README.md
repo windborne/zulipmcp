@@ -18,7 +18,7 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
    uv add zulipmcp --git https://github.com/windborne/zulipmcp.git
    ```
 
-2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Configuring the Python bindings](https://zulip.com/api/configuring-python-bindings) for details on the file format and how to download one from your Zulip organization.
+2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Add a bot or integration](https://zulip.com/help/add-a-bot-or-integration) for instructions on making a bot. The bot type must be "generic"
 
 3. Add the MCP server to your `.mcp.json`:
 
