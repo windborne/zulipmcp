@@ -136,11 +136,11 @@ def run(cfg: Config):
         """Check if a stream is private (invite_only) via the Zulip API."""
         result = client.get_streams(include_public=True, include_subscribed=True)
         if result.get("result") != "success":
-            return False  # can't determine — assume public
+            return True  # can't determine — assume private (safer)
         for s in result.get("streams", []):
             if s["name"].lower() == stream_name.lower():
                 return s.get("invite_only", False)
-        return False  # stream not found — let it fail downstream
+        return True  # stream not in results — must be private (all public streams are always returned)
 
     def _ensure_subscribed(stream_name: str) -> bool:
         """Subscribe the bot to a public stream. Returns True on success."""
