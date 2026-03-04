@@ -175,7 +175,7 @@ def is_stream_private(stream_name: str) -> bool:
     # Fetch all streams and cache every one — avoids repeated API calls
     result = get_client().get_streams(include_public=True, include_subscribed=True)
     if result["result"] != "success":
-        return False
+        return True  # can't determine — assume private (safer)
 
     for s in result.get("streams", []):
         is_private = s.get("invite_only", False)
@@ -183,7 +183,7 @@ def is_stream_private(stream_name: str) -> bool:
 
     # Re-check cache after populating
     cached = _cache.get(cache_key)
-    return cached if cached is not None else False
+    return cached if cached is not None else True  # not in results — must be private
 
 
 def get_client() -> zulip.Client:
