@@ -7,8 +7,10 @@ Defaults:
 """
 
 import argparse
+import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -79,6 +81,69 @@ def _build_env(cfg: Config, msg: dict) -> dict:
     return env
 
 
+_SIGNOFF_GRACE_SECS = 10  # seconds to wait after sign_off before killing
+
+
+def _is_signoff_result(line: str) -> bool:
+    """Check if a stream-json line is the tool_result for sign_off/end_session."""
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    # Collect all text from tool_use_result (can be str, list, or dict)
+    tur = obj.get("tool_use_result")
+    result_text = ""
+    if isinstance(tur, str):
+        result_text = tur
+    elif isinstance(tur, dict):
+        content = tur.get("content", "")
+        result_text = content if isinstance(content, str) else str(content)
+    elif isinstance(tur, list):
+        result_text = " ".join(str(item) for item in tur)
+    # Also check message.content blocks
+    for block in obj.get("message", {}).get("content", []):
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            content = block.get("content", "")
+            result_text += " " + (content if isinstance(content, str) else str(content))
+    return "Signed off from" in result_text or "Session ended" in result_text
+
+
+def _relay_with_timestamps(pipe, fh, proc):
+    """Read lines from pipe, write to fh with Unix-timestamp prefix.
+
+    Watches for sign_off/end_session tool results and kills the subprocess
+    after a grace period to prevent zombie sessions.
+    """
+    try:
+        for line in pipe:
+            fh.write(f"{int(time.time())}\t{line}")
+            fh.flush()
+            if _is_signoff_result(line):
+                print(f"[listener] Sign-off detected for pid={proc.pid}, "
+                      f"killing in {_SIGNOFF_GRACE_SECS}s", file=sys.stderr)
+                threading.Timer(
+                    _SIGNOFF_GRACE_SECS, _kill_gracefully, args=(proc,)
+                ).start()
+    except ValueError:
+        pass  # pipe closed
+    finally:
+        fh.close()
+
+
+def _kill_gracefully(proc):
+    """Send SIGTERM, wait briefly, then SIGKILL if still alive."""
+    if proc.poll() is not None:
+        return  # already dead
+    print(f"[listener] Sending SIGTERM to pid={proc.pid}", file=sys.stderr)
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print(f"[listener] SIGTERM timeout, sending SIGKILL to pid={proc.pid}",
+              file=sys.stderr)
+        proc.kill()
+
+
 def _spawn(cfg: Config, msg: dict):
     """Launch a Claude Code session for this message, if not already running."""
     stream, topic = msg["display_recipient"], msg["subject"]
@@ -97,14 +162,25 @@ def _spawn(cfg: Config, msg: dict):
     proc = subprocess.Popen(
         _build_cmd(cfg, stream, topic),
         cwd=cfg.working_dir, env=_build_env(cfg, msg),
-        stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        text=True, bufsize=1,
     )
     with _lock:
         _sessions[key] = proc
 
+    # Write sidecar PID file for log_server live-status detection
+    pid_path = log_path.with_suffix(".pid")
+    pid_path.write_text(str(proc.pid))
+
+    # Relay stdout → log file with timestamps + sign-off watchdog
+    threading.Thread(
+        target=_relay_with_timestamps, args=(proc.stdout, fh, proc),
+        daemon=True, name=f"relay:{key[0]}/{key[1]}",
+    ).start()
+
     def reap():
         proc.wait()
-        fh.close()
+        pid_path.unlink(missing_ok=True)
         with _lock:
             _sessions.pop(key, None)
 
