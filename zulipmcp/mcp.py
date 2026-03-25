@@ -143,29 +143,36 @@ _session = SessionState()
 # Session tools — for interactive chat participation
 # ============================================================================
 
-@mcp.tool()
-def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
-    """Initialize the session context for a conversation.
-    Call this once at the start of a session to set where you're chatting.
+def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
+    """Initialize (or re-initialize) the session programmatically.
+
+    Sets the active stream/topic, fetches the bot profile, starts a typing
+    indicator, and optionally fetches recent message history.
+
+    This is the same logic that ``set_context()`` exposes as an MCP tool,
+    but callable directly from Python — useful for auto-init at startup or
+    for wrapper scripts that know the target conversation in advance.
 
     Args:
-        stream: The name of the Zulip stream/channel.
-        topic: The topic name within the stream.
-        num_messages: Number of recent messages to fetch for context (default 20).
+        stream: The Zulip stream/channel name.
+        topic: The topic within the stream.
+        num_messages: How many recent messages to fetch (default 0).
 
     Returns:
-        Confirmation with recent message history to get you up to speed.
+        A formatted string with session confirmation and (if requested)
+        conversation history.  When called from auto-init the return
+        value is typically discarded.
     """
-    _logger.info(f"set_context() called: stream={stream}, topic={topic}")
+    _logger.info(f"init_session() called: stream={stream}, topic={topic}, num_messages={num_messages}")
     err = _reject_if_private(stream)
     if err:
-        _logger.warning(f"set_context() denied private stream access: stream={stream}")
+        _logger.warning(f"init_session() denied private stream access: stream={stream}")
         return err
 
     profile = zulip_core.get_profile()
     if profile.get("result") == "success":
         _session.my_user_id = profile.get("user_id")
-        _logger.debug(f"set_context: user_id={_session.my_user_id}")
+        _logger.debug(f"init_session: user_id={_session.my_user_id}")
 
     _session.stream = stream
     _session.topic = topic
@@ -176,7 +183,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages)
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
-        _logger.debug(f"set_context: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
+        _logger.debug(f"init_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
 
     # Start typing — agent is about to do work
     try:
@@ -210,7 +217,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     output = header + "\n" + zulip_core.format_messages(messages, include_topic=False)
 
     footer = "\n--- END CONVERSATION HISTORY ---"
-    if msg_count >= num_messages:
+    if msg_count >= num_messages and num_messages > 0:
         footer += "\nThere may be older messages not shown. Use get_messages(message_id=...) to see further back."
     output += footer
 
@@ -230,8 +237,24 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
             "You can also see which custom emoji people use via reactions on messages above."
         )
 
-    _logger.info(f"set_context() completed successfully")
+    _logger.info(f"init_session() completed successfully")
     return output
+
+
+@mcp.tool()
+def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
+    """Initialize the session context for a conversation.
+    Call this once at the start of a session to set where you're chatting.
+
+    Args:
+        stream: The name of the Zulip stream/channel.
+        topic: The topic name within the stream.
+        num_messages: Number of recent messages to fetch for context (default 20).
+
+    Returns:
+        Confirmation with recent message history to get you up to speed.
+    """
+    return init_session(stream, topic, num_messages)
 
 
 @mcp.tool()
@@ -1085,6 +1108,28 @@ def upload_file(file_path: str) -> str:
 # ============================================================================
 
 def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
+    """Start the MCP server.
+
+    If the environment variables ``SESSION_STREAM`` and ``SESSION_TOPIC``
+    are set, the session is automatically initialized before the MCP
+    transport starts.  This is useful for headless deployments where the
+    target conversation is known at launch time — the agent wakes up with
+    an active session and can skip the manual ``set_context()`` call.
+
+    Any hooks registered via :func:`configure` (e.g. ``message_prefix``,
+    ``on_set_context``) are already in place by this point, so auto-init
+    fires them exactly as ``set_context()`` would.
+    """
+    # Auto-init session from env vars when both are present.
+    stream = os.environ.get("SESSION_STREAM")
+    topic = os.environ.get("SESSION_TOPIC")
+    if stream and topic:
+        _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
+        try:
+            init_session(stream, topic, num_messages=0)
+        except Exception:
+            _logger.warning("run_server: auto-init failed, falling back to manual set_context()", exc_info=True)
+
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:

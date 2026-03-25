@@ -1,4 +1,4 @@
-from .mcp import configure, mcp
+from .mcp import configure, init_session, mcp
 
 from .core import (
     get_client,
