@@ -146,12 +146,8 @@ _session = SessionState()
 def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     """Initialize (or re-initialize) the session programmatically.
 
-    Sets the active stream/topic, fetches the bot profile, starts a typing
-    indicator, and optionally fetches recent message history.
-
-    This is the same logic that ``set_context()`` exposes as an MCP tool,
-    but callable directly from Python — useful for auto-init at startup or
-    for wrapper scripts that know the target conversation in advance.
+    Same logic as the ``set_context()`` MCP tool, but callable from Python
+    — useful for auto-init at startup or wrapper scripts.
 
     Args:
         stream: The Zulip stream/channel name.
@@ -159,9 +155,7 @@ def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
         num_messages: How many recent messages to fetch (default 0).
 
     Returns:
-        A formatted string with session confirmation and (if requested)
-        conversation history.  When called from auto-init the return
-        value is typically discarded.
+        Formatted string with session confirmation and conversation history.
     """
     _logger.info(f"init_session() called: stream={stream}, topic={topic}, num_messages={num_messages}")
     err = _reject_if_private(stream)
@@ -1110,15 +1104,10 @@ def upload_file(file_path: str) -> str:
 def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
     """Start the MCP server.
 
-    If the environment variables ``SESSION_STREAM`` and ``SESSION_TOPIC``
-    are set, the session is automatically initialized before the MCP
-    transport starts.  This is useful for headless deployments where the
-    target conversation is known at launch time — the agent wakes up with
-    an active session and can skip the manual ``set_context()`` call.
-
-    Any hooks registered via :func:`configure` (e.g. ``message_prefix``,
-    ``on_set_context``) are already in place by this point, so auto-init
-    fires them exactly as ``set_context()`` would.
+    If ``SESSION_STREAM`` and ``SESSION_TOPIC`` env vars are set, the
+    session is auto-initialized before the transport starts — the agent
+    wakes up with an active session and can skip ``set_context()``.
+    Call :func:`configure` before this to register hooks.
     """
     # Auto-init session from env vars when both are present.
     stream = os.environ.get("SESSION_STREAM")
@@ -1126,9 +1115,12 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     if stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
-            init_session(stream, topic, num_messages=0)
+            result = init_session(stream, topic, num_messages=0)
+            # init_session returns an error string (not raising) for private streams
+            if result and result.startswith("Error:"):
+                _logger.error(f"run_server: auto-init returned error: {result}")
         except Exception:
-            _logger.warning("run_server: auto-init failed, falling back to manual set_context()", exc_info=True)
+            _logger.error("run_server: auto-init failed, session not pre-initialized", exc_info=True)
 
     if transport == "stdio":
         mcp.run(transport="stdio")
