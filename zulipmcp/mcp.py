@@ -143,11 +143,12 @@ _session = SessionState()
 # Session tools — for interactive chat participation
 # ============================================================================
 
-def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
-    """Initialize (or re-initialize) the session programmatically.
+def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
+    """Initialize (or re-initialize) the session.
 
-    Same logic as the ``set_context()`` MCP tool, but callable from Python
-    — useful for auto-init at startup or wrapper scripts.
+    Sets session state, fetches the bot profile, and optionally fetches
+    recent message history.  Does NOT start a typing indicator — callers
+    that want one (e.g. ``set_context()``) should send it themselves.
 
     Args:
         stream: The Zulip stream/channel name.
@@ -157,16 +158,16 @@ def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     Returns:
         Formatted string with session confirmation and conversation history.
     """
-    _logger.info(f"init_session() called: stream={stream}, topic={topic}, num_messages={num_messages}")
+    _logger.info(f"_init_session() called: stream={stream}, topic={topic}, num_messages={num_messages}")
     err = _reject_if_private(stream)
     if err:
-        _logger.warning(f"init_session() denied private stream access: stream={stream}")
+        _logger.warning(f"_init_session() denied private stream access: stream={stream}")
         return err
 
     profile = zulip_core.get_profile()
     if profile.get("result") == "success":
         _session.my_user_id = profile.get("user_id")
-        _logger.debug(f"init_session: user_id={_session.my_user_id}")
+        _logger.debug(f"_init_session: user_id={_session.my_user_id}")
 
     _session.stream = stream
     _session.topic = topic
@@ -177,13 +178,7 @@ def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages)
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
-        _logger.debug(f"init_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
-
-    # Start typing — agent is about to do work
-    try:
-        zulip_core.send_typing(stream, topic, "start")
-    except Exception:
-        pass
+        _logger.debug(f"_init_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
 
     # Override with trigger message ID so first react() targets the @mention
     trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
@@ -231,7 +226,7 @@ def init_session(stream: str, topic: str, num_messages: int = 0) -> str:
             "You can also see which custom emoji people use via reactions on messages above."
         )
 
-    _logger.info(f"init_session() completed successfully")
+    _logger.info(f"_init_session() completed successfully")
     return output
 
 
@@ -248,7 +243,15 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     Returns:
         Confirmation with recent message history to get you up to speed.
     """
-    return init_session(stream, topic, num_messages)
+    result = _init_session(stream, topic, num_messages)
+
+    # Start typing — agent is about to do work
+    try:
+        zulip_core.send_typing(stream, topic, "start")
+    except Exception:
+        pass
+
+    return result
 
 
 @mcp.tool()
@@ -1115,8 +1118,8 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     if stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
-            result = init_session(stream, topic, num_messages=0)
-            # init_session returns an error string (not raising) for private streams
+            result = _init_session(stream, topic, num_messages=0)
+            # _init_session returns an error string (not raising) for private streams
             if result and result.startswith("Error:"):
                 _logger.error(f"run_server: auto-init returned error: {result}")
         except Exception:
