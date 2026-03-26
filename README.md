@@ -91,6 +91,8 @@ When `reply` is called, it checks for new messages *before* sending. If anyone p
 |---|---|
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
+| `SESSION_STREAM` | Stream name for auto-initializing a session on server start. Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |
+| `SESSION_TOPIC` | Topic for auto-initializing a session on server start. Used with `SESSION_STREAM`. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
 
 ## Logging

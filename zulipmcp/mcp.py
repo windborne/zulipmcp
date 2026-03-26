@@ -175,19 +175,20 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     _session.active = True
     _session.started_at = time.time()
 
-    messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages)
+    messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages) if num_messages > 0 else []
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
         _logger.debug(f"_init_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
 
     # Override with trigger message ID so first react() targets the @mention
+    trigger_id = None
     trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
     if trigger_msg_id:
         try:
             trigger_id = int(trigger_msg_id)
             _session.last_seen_message_id = trigger_id
         except (ValueError, TypeError):
-            trigger_id = None
+            _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
     header = f"Session context set to {visibility} #{stream} > {topic}"
 
@@ -211,11 +212,8 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     output += footer
 
     # Trigger message ID info
-    if trigger_msg_id:
-        try:
-            output += f"\n\nTrigger message ID: {int(trigger_msg_id)}"
-        except (ValueError, TypeError):
-            pass
+    if trigger_id is not None:
+        output += f"\n\nTrigger message ID: {trigger_id}"
 
     # Custom emoji count
     emoji_count = zulip_core.get_emoji_count()
@@ -246,10 +244,11 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     result = _init_session(stream, topic, num_messages)
 
     # Start typing — agent is about to do work
-    try:
-        zulip_core.send_typing(stream, topic, "start")
-    except Exception:
-        pass
+    if not result.startswith("Error:"):
+        try:
+            zulip_core.send_typing(stream, topic, "start")
+        except Exception:
+            _logger.debug("set_context: send_typing failed", exc_info=True)
 
     return result
 
@@ -1122,8 +1121,12 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
             # _init_session returns an error string (not raising) for private streams
             if result and result.startswith("Error:"):
                 _logger.error(f"run_server: auto-init returned error: {result}")
+                _session.reset()
         except Exception:
             _logger.error("run_server: auto-init failed, session not pre-initialized", exc_info=True)
+            _session.reset()
+    elif stream or topic:
+        _logger.warning(f"run_server: partial auto-init config — SESSION_STREAM={stream!r}, SESSION_TOPIC={topic!r}; both must be set")
 
     if transport == "stdio":
         mcp.run(transport="stdio")
