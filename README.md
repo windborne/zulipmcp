@@ -91,7 +91,7 @@ When `reply` is called, it checks for new messages *before* sending. If anyone p
 |---|---|
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
-| `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only — the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. No message history is pre-fetched (use `get_messages()` if needed). |
+| `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only — the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. One message is fetched to anchor `last_seen_message_id` (needed for missed-message detection in `reply()` and catch-up in `listen()`); use `get_messages()` for full history. |
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
 

@@ -184,7 +184,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
 
     # Override with trigger message ID so first react() targets the @mention
     trigger_id = None
-    trigger_msg_id = os.environ.pop("TRIGGER_MESSAGE_ID", None)
+    trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
     if trigger_msg_id:
         try:
             trigger_id = int(trigger_msg_id)
