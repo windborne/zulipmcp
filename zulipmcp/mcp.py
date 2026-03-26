@@ -165,9 +165,11 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
         return err
 
     profile = zulip_core.get_profile()
-    if profile.get("result") == "success":
-        _session.my_user_id = profile.get("user_id")
-        _logger.debug(f"_init_session: user_id={_session.my_user_id}")
+    if profile.get("result") != "success":
+        _logger.error(f"_init_session: get_profile() failed: {profile}")
+        return f"Error: failed to fetch bot profile — check credentials and connectivity ({profile.get('msg', 'unknown error')})"
+    _session.my_user_id = profile.get("user_id")
+    _logger.debug(f"_init_session: user_id={_session.my_user_id}")
 
     _session.stream = stream
     _session.topic = topic
@@ -182,7 +184,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
 
     # Override with trigger message ID so first react() targets the @mention
     trigger_id = None
-    trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
+    trigger_msg_id = os.environ.pop("TRIGGER_MESSAGE_ID", None)
     if trigger_msg_id:
         try:
             trigger_id = int(trigger_msg_id)
@@ -191,16 +193,6 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
             _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
     header = f"Session context set to {visibility} #{stream} > {topic}"
-
-    # Allow hook to inject extra context (e.g. custom instructions)
-    on_set_ctx = _hooks.get("on_set_context")
-    if on_set_ctx:
-        try:
-            extra = on_set_ctx(stream, topic)
-            if extra:
-                header += "\n\n" + extra
-        except Exception:
-            pass
 
     msg_count = len(messages)
     header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
@@ -224,7 +216,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
             "You can also see which custom emoji people use via reactions on messages above."
         )
 
-    _logger.info(f"_init_session() completed successfully")
+    _logger.info("_init_session() completed successfully")
     return output
 
 
@@ -241,10 +233,25 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     Returns:
         Confirmation with recent message history to get you up to speed.
     """
-    result = _init_session(stream, topic, num_messages)
+    try:
+        result = _init_session(stream, topic, num_messages)
+    except Exception:
+        _logger.error("set_context: _init_session raised, resetting session", exc_info=True)
+        _session.reset()
+        return "Error: session initialization failed unexpectedly — check server logs"
 
-    # Start typing — agent is about to do work
     if not result.startswith("Error:"):
+        # Fire on_set_context hook (only for interactive set_context, not auto-init)
+        on_set_ctx = _hooks.get("on_set_context")
+        if on_set_ctx:
+            try:
+                extra = on_set_ctx(stream, topic)
+                if extra:
+                    result += "\n\n" + extra
+            except Exception:
+                _logger.warning("set_context: on_set_context hook failed", exc_info=True)
+
+        # Start typing — agent is about to do work
         try:
             zulip_core.send_typing(stream, topic, "start")
         except Exception:
@@ -1112,12 +1119,12 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     Call :func:`configure` before this to register hooks.
     """
     # Auto-init session from env vars when both are present.
-    stream = os.environ.get("SESSION_STREAM")
-    topic = os.environ.get("SESSION_TOPIC")
+    stream = (os.environ.get("SESSION_STREAM") or "").strip() or None
+    topic = (os.environ.get("SESSION_TOPIC") or "").strip() or None
     if stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
-            result = _init_session(stream, topic, num_messages=0)
+            result = _init_session(stream, topic, num_messages=1)
             # _init_session returns an error string (not raising) for private streams
             if result and result.startswith("Error:"):
                 _logger.error(f"run_server: auto-init returned error: {result}")
