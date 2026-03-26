@@ -1119,8 +1119,8 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     Call :func:`configure` before this to register hooks.
     """
     # Auto-init session from env vars when both are present.
-    stream = (os.environ.get("SESSION_STREAM") or "").strip() or None
-    topic = (os.environ.get("SESSION_TOPIC") or "").strip() or None
+    stream = os.environ.get("SESSION_STREAM", "").strip() or None
+    topic = os.environ.get("SESSION_TOPIC", "").strip() or None
     if stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
