@@ -143,6 +143,83 @@ _session = SessionState()
 # Session tools — for interactive chat participation
 # ============================================================================
 
+def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
+    """Initialize (or re-initialize) the session.
+
+    Sets session state, fetches the bot profile, and optionally fetches
+    recent message history.  Does NOT start a typing indicator — callers
+    that want one (e.g. ``set_context()``) should send it themselves.
+
+    Args:
+        stream: The Zulip stream/channel name.
+        topic: The topic within the stream.
+        num_messages: How many recent messages to fetch (default 0).
+
+    Returns:
+        Formatted string with session confirmation and conversation history.
+    """
+    _logger.info(f"_init_session() called: stream={stream}, topic={topic}, num_messages={num_messages}")
+    err = _reject_if_private(stream)
+    if err:
+        _logger.warning(f"_init_session() denied private stream access: stream={stream}")
+        return err
+
+    profile = zulip_core.get_profile()
+    if profile.get("result") != "success":
+        _logger.error(f"_init_session: get_profile() failed: {profile}")
+        return f"Error: failed to fetch bot profile — check credentials and connectivity ({profile.get('msg', 'unknown error')})"
+    _session.my_user_id = profile.get("user_id")
+    _logger.debug(f"_init_session: user_id={_session.my_user_id}")
+
+    _session.stream = stream
+    _session.topic = topic
+    _session.user_email = os.environ.get("SESSION_USER_EMAIL", "")
+    _session.active = True
+    _session.started_at = time.time()
+
+    messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages) if num_messages > 0 else []
+    if messages:
+        _session.last_seen_message_id = messages[-1]["id"]
+        _logger.debug(f"_init_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
+
+    # Override with trigger message ID so first react() targets the @mention
+    trigger_id = None
+    trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
+    if trigger_msg_id:
+        try:
+            trigger_id = int(trigger_msg_id)
+            _session.last_seen_message_id = trigger_id
+        except (ValueError, TypeError):
+            _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
+    visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
+    header = f"Session context set to {visibility} #{stream} > {topic}"
+
+    msg_count = len(messages)
+    header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
+    output = header + "\n" + zulip_core.format_messages(messages, include_topic=False)
+
+    footer = "\n--- END CONVERSATION HISTORY ---"
+    if msg_count >= num_messages and num_messages > 0:
+        footer += "\nThere may be older messages not shown. Use get_messages(message_id=...) to see further back."
+    output += footer
+
+    # Trigger message ID info
+    if trigger_id is not None:
+        output += f"\n\nTrigger message ID: {trigger_id}"
+
+    # Custom emoji count
+    emoji_count = zulip_core.get_emoji_count()
+    if emoji_count:
+        output += (
+            f"\n\n---\n{emoji_count} custom emoji available on this server. "
+            "Use `list_emoji(query)` to search by name. "
+            "You can also see which custom emoji people use via reactions on messages above."
+        )
+
+    _logger.info("_init_session() completed successfully")
+    return output
+
+
 @mcp.tool()
 def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     """Initialize the session context for a conversation.
@@ -156,82 +233,31 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     Returns:
         Confirmation with recent message history to get you up to speed.
     """
-    _logger.info(f"set_context() called: stream={stream}, topic={topic}")
-    err = _reject_if_private(stream)
-    if err:
-        _logger.warning(f"set_context() denied private stream access: stream={stream}")
-        return err
-
-    profile = zulip_core.get_profile()
-    if profile.get("result") == "success":
-        _session.my_user_id = profile.get("user_id")
-        _logger.debug(f"set_context: user_id={_session.my_user_id}")
-
-    _session.stream = stream
-    _session.topic = topic
-    _session.user_email = os.environ.get("SESSION_USER_EMAIL", "")
-    _session.active = True
-    _session.started_at = time.time()
-
-    messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages)
-    if messages:
-        _session.last_seen_message_id = messages[-1]["id"]
-        _logger.debug(f"set_context: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
-
-    # Start typing — agent is about to do work
     try:
-        zulip_core.send_typing(stream, topic, "start")
+        result = _init_session(stream, topic, num_messages)
     except Exception:
-        pass
+        _logger.error("set_context: _init_session raised, resetting session", exc_info=True)
+        _session.reset()
+        return "Error: session initialization failed unexpectedly — check server logs"
 
-    # Override with trigger message ID so first react() targets the @mention
-    trigger_msg_id = os.environ.get("TRIGGER_MESSAGE_ID")
-    if trigger_msg_id:
-        try:
-            trigger_id = int(trigger_msg_id)
-            _session.last_seen_message_id = trigger_id
-        except (ValueError, TypeError):
-            trigger_id = None
-    visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
-    header = f"Session context set to {visibility} #{stream} > {topic}"
+    if not result.startswith("Error:"):
+        # Fire on_set_context hook (only for interactive set_context, not auto-init)
+        on_set_ctx = _hooks.get("on_set_context")
+        if on_set_ctx:
+            try:
+                extra = on_set_ctx(stream, topic)
+                if extra:
+                    result += "\n\n" + extra
+            except Exception:
+                _logger.warning("set_context: on_set_context hook failed", exc_info=True)
 
-    # Allow hook to inject extra context (e.g. custom instructions)
-    on_set_ctx = _hooks.get("on_set_context")
-    if on_set_ctx:
+        # Start typing — agent is about to do work
         try:
-            extra = on_set_ctx(stream, topic)
-            if extra:
-                header += "\n\n" + extra
+            zulip_core.send_typing(stream, topic, "start")
         except Exception:
-            pass
+            _logger.debug("set_context: send_typing failed", exc_info=True)
 
-    msg_count = len(messages)
-    header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
-    output = header + "\n" + zulip_core.format_messages(messages, include_topic=False)
-
-    footer = "\n--- END CONVERSATION HISTORY ---"
-    if msg_count >= num_messages:
-        footer += "\nThere may be older messages not shown. Use get_messages(message_id=...) to see further back."
-    output += footer
-
-    # Trigger message ID info
-    if trigger_msg_id:
-        try:
-            output += f"\n\nTrigger message ID: {int(trigger_msg_id)}"
-        except (ValueError, TypeError):
-            pass
-
-    # Custom emoji count
-    emoji_count = zulip_core.get_emoji_count()
-    if emoji_count:
-        output += (
-            f"\n\n---\n{emoji_count} custom emoji available on this server. "
-            "Use `list_emoji(query)` to search by name. "
-            "You can also see which custom emoji people use via reactions on messages above."
-        )
-
-    _logger.info(f"set_context() completed successfully")
-    return output
+    return result
 
 
 @mcp.tool()
@@ -1085,6 +1111,30 @@ def upload_file(file_path: str) -> str:
 # ============================================================================
 
 def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
+    """Start the MCP server.
+
+    If ``SESSION_STREAM`` and ``SESSION_TOPIC`` env vars are set, the
+    session is auto-initialized before the transport starts — the agent
+    wakes up with an active session and can skip ``set_context()``.
+    Call :func:`configure` before this to register hooks.
+    """
+    # Auto-init session from env vars when both are present.
+    stream = os.environ.get("SESSION_STREAM", "").strip() or None
+    topic = os.environ.get("SESSION_TOPIC", "").strip() or None
+    if stream and topic:
+        _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
+        try:
+            result = _init_session(stream, topic, num_messages=1)
+            # _init_session returns an error string (not raising) for private streams
+            if result and result.startswith("Error:"):
+                _logger.error(f"run_server: auto-init returned error: {result}")
+                _session.reset()
+        except Exception:
+            _logger.error("run_server: auto-init failed, session not pre-initialized", exc_info=True)
+            _session.reset()
+    elif stream or topic:
+        _logger.warning(f"run_server: partial auto-init config — SESSION_STREAM={stream!r}, SESSION_TOPIC={topic!r}; both must be set")
+
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
