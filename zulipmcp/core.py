@@ -812,6 +812,30 @@ def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
     return get_client().update_message(request)
 
 
+def resolve_topic(message_id: int, topic: str, propagate_mode: str = "change_all") -> dict:
+    """Resolve or unresolve a topic by toggling the ✔ prefix.
+
+    Unlike move_messages, this suppresses notifications to avoid creating
+    redirect stubs that clutter the stream.
+
+    Args:
+        message_id: Any message in the topic to resolve/unresolve.
+        topic: The new topic name (include or remove ✔ prefix as desired).
+        propagate_mode: "change_one", "change_later", or "change_all" (default).
+
+    Returns:
+        API result dict.
+    """
+    request: dict = {
+        "message_id": message_id,
+        "topic": topic,
+        "propagate_mode": propagate_mode,
+        "send_notification_to_old_thread": False,
+        "send_notification_to_new_thread": False,
+    }
+    return get_client().update_message(request)
+
+
 _stream_id_cache: dict[str, int] = {}
 
 

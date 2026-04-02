@@ -916,6 +916,41 @@ def move_messages(message_id: int, topic: str, stream: str = "",
 
 
 @mcp.tool()
+def resolve_topic(message_id: int, topic: str,
+                  propagate_mode: str = "change_all") -> str:
+    """Resolve or unresolve a topic by toggling the ✔ prefix.
+
+    Renames the topic silently — no "This topic was moved to..." notification
+    is created in either the old or new thread. Use this instead of
+    move_messages when you want to mark a topic as resolved/done without
+    spamming the stream.
+
+    Args:
+        message_id: Any message ID in the topic to resolve. Use get_messages()
+            to find one.
+        topic: The full new topic name. To resolve, prepend "✔ " to the
+            existing topic (e.g. "✔ PR #2312: Fix thing"). To unresolve,
+            remove the "✔ " prefix.
+        propagate_mode: Which messages to rename:
+            - "change_all": All messages in the topic (default, usually what you want).
+            - "change_later": This message and all after it.
+            - "change_one": Only the specified message.
+
+    Returns:
+        Confirmation or error message.
+    """
+    valid_modes = ("change_one", "change_later", "change_all")
+    if propagate_mode not in valid_modes:
+        return f"Error: propagate_mode must be one of {valid_modes}, got '{propagate_mode}'"
+    result = zulip_core.resolve_topic(
+        message_id, topic, propagate_mode=propagate_mode,
+    )
+    if result.get("result") != "success":
+        return f"Error resolving topic: {result.get('msg', 'Unknown error')}"
+    return f"Topic renamed to '{topic}' (no notification sent)."
+
+
+@mcp.tool()
 def list_emoji(query: str = "") -> str:
     """Search custom emoji available on this Zulip server.
 
