@@ -781,17 +781,18 @@ def edit_message(message_id: int, content: str) -> dict:
 
 
 def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
-                  propagate_mode: str = "change_one") -> dict:
+                  propagate_mode: str = "change_one", notify: bool = True) -> dict:
     """Move message(s) to a different topic and/or stream.
 
     Uses the Zulip update_message API with topic/stream_id params.
-    Notifications are always sent to both old and new threads.
 
     Args:
         message_id: The anchor message to move.
         topic: Destination topic name.
         stream: Destination stream name (optional, only for cross-channel moves).
         propagate_mode: "change_one", "change_later", or "change_all".
+        notify: Send notifications to old and new threads (default True).
+            Set to False for silent renames like topic resolution.
 
     Returns:
         API result dict.
@@ -800,8 +801,8 @@ def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
         "message_id": message_id,
         "topic": topic,
         "propagate_mode": propagate_mode,
-        "send_notification_to_old_thread": True,
-        "send_notification_to_new_thread": True,
+        "send_notification_to_old_thread": notify,
+        "send_notification_to_new_thread": notify,
     }
     if stream:
         client = get_client()
@@ -809,30 +810,6 @@ def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
         if result["result"] != "success":
             return result
         request["stream_id"] = result["stream_id"]
-    return get_client().update_message(request)
-
-
-def resolve_topic(message_id: int, topic: str, propagate_mode: str = "change_all") -> dict:
-    """Resolve or unresolve a topic by toggling the ✔ prefix.
-
-    Unlike move_messages, this suppresses notifications to avoid creating
-    redirect stubs that clutter the stream.
-
-    Args:
-        message_id: Any message in the topic to resolve/unresolve.
-        topic: The new topic name (include or remove ✔ prefix as desired).
-        propagate_mode: "change_one", "change_later", or "change_all" (default).
-
-    Returns:
-        API result dict.
-    """
-    request: dict = {
-        "message_id": message_id,
-        "topic": topic,
-        "propagate_mode": propagate_mode,
-        "send_notification_to_old_thread": False,
-        "send_notification_to_new_thread": False,
-    }
     return get_client().update_message(request)
 
 
