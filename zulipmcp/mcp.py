@@ -905,7 +905,9 @@ def move_messages(message_id: int, topic: str, stream: str = "",
         message_id, topic, stream=stream or None, propagate_mode=propagate_mode,
     )
     if result.get("result") != "success":
-        return f"Error moving message(s): {result.get('msg', 'Unknown error')}"
+        code = result.get("code", "")
+        msg = result.get("msg", "Unknown error")
+        return f"Error moving message(s): {msg}" + (f" [{code}]" if code else "")
     mode_desc = {
         "change_one": "1 message",
         "change_later": "message and all following",
@@ -943,7 +945,9 @@ def resolve_topic(message_id: int, topic: str,
         message_id, topic, propagate_mode=propagate_mode, notify=False,
     )
     if result.get("result") != "success":
-        return f"Error resolving topic: {result.get('msg', 'Unknown error')}"
+        code = result.get("code", "")
+        msg = result.get("msg", "Unknown error")
+        return f"Error resolving topic: {msg}" + (f" [{code}]" if code else "")
     return f"Topic renamed to '{topic}' (no notification sent)."
 
 
