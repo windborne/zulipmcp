@@ -905,7 +905,9 @@ def move_messages(message_id: int, topic: str, stream: str = "",
         message_id, topic, stream=stream or None, propagate_mode=propagate_mode,
     )
     if result.get("result") != "success":
-        return f"Error moving message(s): {result.get('msg', 'Unknown error')}"
+        code = result.get("code", "")
+        msg = result.get("msg", "Unknown error")
+        return f"Error moving message(s): {msg}" + (f" [{code}]" if code else "")
     mode_desc = {
         "change_one": "1 message",
         "change_later": "message and all following",
@@ -913,6 +915,40 @@ def move_messages(message_id: int, topic: str, stream: str = "",
     }
     dest = f"#{stream} > {topic}" if stream else topic
     return f"Moved {mode_desc[propagate_mode]} to {dest}."
+
+
+@mcp.tool()
+def resolve_topic(message_id: int, topic: str,
+                  propagate_mode: str = "change_all") -> str:
+    """Rename a topic silently to mark it resolved or unresolved.
+
+    No "This topic was moved to..." notification is created in either thread.
+    Use this instead of move_messages when marking a topic as done.
+
+    Args:
+        message_id: Any message ID in the topic. Use get_messages() to find one.
+        topic: The full new topic name. To resolve, prepend "✔ " to the
+            existing topic (e.g. "✔ PR #2312: Fix thing"). To unresolve,
+            remove the "✔ " prefix.
+        propagate_mode: Which messages to rename:
+            - "change_all": All messages in the topic (default).
+            - "change_later": This message and all after it.
+            - "change_one": Only the specified message.
+
+    Returns:
+        Confirmation or error message.
+    """
+    valid_modes = ("change_one", "change_later", "change_all")
+    if propagate_mode not in valid_modes:
+        return f"Error: propagate_mode must be one of {valid_modes}, got '{propagate_mode}'"
+    result = zulip_core.move_messages(
+        message_id, topic, propagate_mode=propagate_mode, notify=False,
+    )
+    if result.get("result") != "success":
+        code = result.get("code", "")
+        msg = result.get("msg", "Unknown error")
+        return f"Error resolving topic: {msg}" + (f" [{code}]" if code else "")
+    return f"Topic renamed to '{topic}' (no notification sent)."
 
 
 @mcp.tool()
