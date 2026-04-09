@@ -18,6 +18,8 @@ from pathlib import Path
 
 import zulip
 
+from . import core as zulip_core
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_SYSTEM_PROMPT_PATH = PACKAGE_DIR / "default_system_prompt.md"
 
@@ -158,16 +160,17 @@ def run(cfg: Config):
             if not _is_subscribed(stream):
                 if _is_stream_private(stream):
                     # Private stream the bot wasn't invited to — send error
-                    try:
-                        client.send_message({
-                            "type": "stream",
-                            "to": stream,
-                            "topic": topic,
-                            "content": PRIVATE_STREAM_NOT_INVITED,
-                        })
-                    except Exception as e:
-                        print(f"[listener] Failed to send private-stream error to #{stream} > {topic}: {e}",
-                              file=sys.stderr)
+                    if zulip_core.is_stream_write_allowed(stream):
+                        try:
+                            client.send_message({
+                                "type": "stream",
+                                "to": stream,
+                                "topic": topic,
+                                "content": PRIVATE_STREAM_NOT_INVITED,
+                            })
+                        except Exception as e:
+                            print(f"[listener] Failed to send private-stream error to #{stream} > {topic}: {e}",
+                                  file=sys.stderr)
                     return
 
                 # Public stream — auto-subscribe so the session can read/listen

@@ -53,12 +53,26 @@ PRIVATE_STREAM_ERROR = (
     "Error: Private stream access denied for this session. "
     "You can only access the private stream where you were pinged."
 )
+WRITE_STREAM_ERROR = (
+    "Error: Stream write access denied for this session. "
+    "This stream is not allowed by BOT_ALLOWED_WRITE_STREAMS."
+)
 
 
 def _reject_if_private(stream: str) -> str | None:
     """Return an error string if the stream is private, None otherwise."""
     if zulip_core.is_stream_private(stream) and not zulip_core.is_private_stream_allowed(stream):
         return PRIVATE_STREAM_ERROR
+    return None
+
+
+def _reject_if_cannot_write(stream: str) -> str | None:
+    """Return an error string if the stream cannot be written to."""
+    err = _reject_if_private(stream)
+    if err:
+        return err
+    if not zulip_core.is_stream_write_allowed(stream):
+        return WRITE_STREAM_ERROR
     return None
 
 
@@ -275,6 +289,10 @@ def reply(content: str) -> str:
     if not _session.active or not _session.stream or not _session.topic:
         _logger.warning("reply() called with no session context")
         return "Error: No session context set. Call set_context first."
+    err = _reject_if_cannot_write(_session.stream)
+    if err:
+        _logger.warning(f"reply() denied write access: stream={_session.stream}")
+        return err
 
     # Check if user already reacted to dismiss while we were working.
     # This catches the race condition where the user reacts during tool
@@ -796,7 +814,7 @@ def send_message(stream: str, topic: str, content: str) -> str:
         topic: Topic name.
         content: Message content (supports Zulip markdown).
     """
-    err = _reject_if_private(stream)
+    err = _reject_if_cannot_write(stream)
     if err:
         return err
     prefix = _get_prefix()
