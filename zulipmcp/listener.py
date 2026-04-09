@@ -35,6 +35,7 @@ class Config:
     """CLI args map 1:1 to fields."""
     zuliprc: Path
     mcp_config: Path = Path(".mcp.json")
+    strict_mcp_config: bool = False
     system_prompt: Path = DEFAULT_SYSTEM_PROMPT_PATH
     working_dir: Path = Path(".")
     claude_command: str = "claude"
@@ -64,6 +65,8 @@ def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
            "--output-format", "stream-json", "--verbose"]
     if cfg.mcp_config.exists():
         cmd += ["--mcp-config", str(cfg.mcp_config.resolve())]
+        if cfg.strict_mcp_config:
+            cmd += ["--strict-mcp-config"]
     if cfg.system_prompt.exists():
         cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
     cmd += ["-p", f"Call set_context('{stream}', '{topic}') to begin, "
@@ -197,6 +200,14 @@ def main():
                    help="Path to .zuliprc (default: ./.zuliprc)")
     p.add_argument("--mcp-config", default=".mcp.json",
                    help="Path to .mcp.json for Claude (default: ./.mcp.json if present)")
+    p.add_argument(
+        "--strict-mcp-config",
+        action="store_true",
+        help=(
+            "Pass --strict-mcp-config to Claude so only --mcp-config is loaded "
+            "(ignores project/user/plugin/connector MCP sources)"
+        ),
+    )
     p.add_argument(
         "--system-prompt",
         default=str(DEFAULT_SYSTEM_PROMPT_PATH),

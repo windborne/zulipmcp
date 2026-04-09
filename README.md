@@ -64,6 +64,7 @@ uv run python -m zulipmcp.listener \
 |---|---|---|
 | `--zuliprc` | `./.zuliprc` | Path to `.zuliprc` (resolved relative to current working directory) |
 | `--mcp-config` | `./.mcp.json` | Path to `.mcp.json` for Claude Code sessions (used only if the file exists) |
+| `--strict-mcp-config` | `false` | Passes Claude Code `--strict-mcp-config` so only the explicit `--mcp-config` file is loaded. For production deployments, you almost certainly want this. |
 | `--system-prompt` | `zulipmcp/default_system_prompt.md` | Appended system prompt file (default path is resolved relative to `listener.py`, not the current working directory) |
 | `--working-dir` | `.` | Working directory for spawned sessions |
 | `--claude-command` | `claude` | Claude CLI binary name or path |
