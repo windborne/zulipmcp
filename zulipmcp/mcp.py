@@ -289,6 +289,10 @@ def reply(content: str) -> str:
     if not _session.active or not _session.stream or not _session.topic:
         _logger.warning("reply() called with no session context")
         return "Error: No session context set. Call set_context first."
+    err = _reject_if_cannot_write(_session.stream)
+    if err:
+        _logger.warning(f"reply() denied write access: stream={_session.stream}")
+        return err
 
     # Check if user already reacted to dismiss while we were working.
     # This catches the race condition where the user reacts during tool

@@ -20,19 +20,26 @@ _ALL_PRIVATE_STREAMS = "__ALL__"
 _dismiss_emoji: set[str] = {"stop_sign", "real-gun"}
 
 
+def _is_allow_all_token(value: object) -> bool:
+    """Whether a value is the special allow-all sentinel."""
+    return isinstance(value, str) and value.strip().upper() == _ALL_PRIVATE_STREAMS
+
+
 def _parse_stream_allowlist(env_var: str, default_all: bool) -> set[str]:
     """Parse a stream allowlist env var into a lowercase set."""
     raw = os.environ.get(env_var, "").strip()
     if not raw:
         return {_ALL_PRIVATE_STREAMS} if default_all else set()
-    if raw == _ALL_PRIVATE_STREAMS:
+    if _is_allow_all_token(raw):
         return {_ALL_PRIVATE_STREAMS}
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
+            if any(_is_allow_all_token(s) for s in parsed):
+                return {_ALL_PRIVATE_STREAMS}
             return {str(s).lower() for s in parsed if str(s).strip()}
         if isinstance(parsed, str):
-            if parsed == _ALL_PRIVATE_STREAMS:
+            if _is_allow_all_token(parsed):
                 return {_ALL_PRIVATE_STREAMS}
             return {parsed.lower()}
     except json.JSONDecodeError:
@@ -78,6 +85,31 @@ def is_stream_write_allowed(stream_name: str) -> bool:
     if _ALL_PRIVATE_STREAMS in allowed:
         return True
     return stream_name.lower() in allowed
+
+
+def _stream_write_error(stream: str) -> Optional[dict]:
+    """Return an API-style error dict if writes to this stream are forbidden."""
+    if is_stream_private(stream) and not is_private_stream_allowed(stream):
+        return {"result": "error", "msg": f"Private stream access denied: {stream}"}
+    if not is_stream_write_allowed(stream):
+        return {"result": "error", "msg": f"Stream write access denied: {stream}"}
+    return None
+
+
+def _get_stream_message_for_write(message_id: int) -> tuple[Optional[dict], Optional[dict]]:
+    """Return a stream message or an API-style error dict for write operations."""
+    msg = get_message_by_id(message_id)
+    if not msg:
+        return None, {"result": "error", "msg": f"Message {message_id} not found or inaccessible"}
+    if msg.get("type") != "stream":
+        return None, {"result": "error", "msg": "This operation only supports stream messages"}
+    stream = msg.get("display_recipient", "")
+    if not stream:
+        return None, {"result": "error", "msg": f"Message {message_id} stream not found"}
+    err = _stream_write_error(stream)
+    if err:
+        return None, err
+    return msg, None
 
 
 def set_ignored_streams(streams: set[str]) -> None:
@@ -753,10 +785,9 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
 
 def send_message(stream: str, topic: str, content: str) -> dict:
     """Send a message. Returns API result dict with 'id' on success."""
-    if is_stream_private(stream) and not is_private_stream_allowed(stream):
-        return {"result": "error", "msg": f"Private stream access denied: {stream}"}
-    if not is_stream_write_allowed(stream):
-        return {"result": "error", "msg": f"Stream write access denied: {stream}"}
+    err = _stream_write_error(stream)
+    if err:
+        return err
     return get_client().send_message({
         "type": "stream",
         "to": stream,
@@ -801,6 +832,9 @@ def remove_reaction(message_id: int, emoji_name: str) -> dict:
 
 def edit_message(message_id: int, content: str) -> dict:
     """Edit a message's content. Returns API result dict."""
+    _, err = _get_stream_message_for_write(message_id)
+    if err:
+        return err
     return get_client().update_message({
         "message_id": message_id,
         "content": content,
@@ -824,6 +858,10 @@ def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
     Returns:
         API result dict.
     """
+    _, err = _get_stream_message_for_write(message_id)
+    if err:
+        return err
+
     request: dict = {
         "message_id": message_id,
         "topic": topic,
@@ -832,6 +870,9 @@ def move_messages(message_id: int, topic: str, stream: Optional[str] = None,
         "send_notification_to_new_thread": notify,
     }
     if stream:
+        err = _stream_write_error(stream)
+        if err:
+            return err
         client = get_client()
         result = client.get_stream_id(stream)
         if result["result"] != "success":
