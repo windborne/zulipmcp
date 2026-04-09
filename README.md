@@ -56,6 +56,9 @@ uv run python -m zulipmcp.listener \
     --mcp-config .mcp.json \
     --system-prompt agent.md \
     --log-dir ./logs
+
+# Pass flags through to Claude Code (everything after --)
+uv run python -m zulipmcp.listener -- --strict-mcp-config --model opus
 ```
 
 **Flags:**
@@ -68,6 +71,7 @@ uv run python -m zulipmcp.listener \
 | `--working-dir` | `.` | Working directory for spawned sessions |
 | `--claude-command` | `claude` | Claude CLI binary name or path |
 | `--log-dir` | `./logs` | Directory for session log files |
+| `-- ...` | *(none)* | Everything after `--` is forwarded to `claude` as-is (e.g. `-- --strict-mcp-config --model opus`) |
 
 Each session gets `TRIGGER_MESSAGE_ID` and `SESSION_USER_EMAIL` set automatically so `set_context()` anchors to the @mention and hooks can identify the requester.
 

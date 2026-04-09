@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import zulip
@@ -39,6 +39,7 @@ class Config:
     working_dir: Path = Path(".")
     claude_command: str = "claude"
     log_dir: Path = Path("./logs")
+    claude_flags: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         self.zuliprc = Path(self.zuliprc)
@@ -64,6 +65,7 @@ def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
            "--output-format", "stream-json", "--verbose"]
     if cfg.mcp_config.exists():
         cmd += ["--mcp-config", str(cfg.mcp_config.resolve())]
+    cmd += cfg.claude_flags
     if cfg.system_prompt.exists():
         cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
     cmd += ["-p", f"Call set_context('{stream}', '{topic}') to begin, "
@@ -208,7 +210,15 @@ def main():
     p.add_argument("--working-dir", default=".", help="Working directory for sessions")
     p.add_argument("--claude-command", default="claude", help="Claude CLI binary name")
     p.add_argument("--log-dir", default="./logs", help="Session log directory")
+    p.add_argument(
+        "claude_flags", nargs=argparse.REMAINDER,
+        help="Additional flags forwarded to Claude Code (place after --)",
+    )
     a = p.parse_args()
+    flags = a.claude_flags or []
+    if flags and flags[0] == "--":
+        flags = flags[1:]
+    a.claude_flags = flags
     run(Config(**vars(a)))
 
 
