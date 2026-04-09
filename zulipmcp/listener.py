@@ -59,12 +59,20 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", text).strip("._") or "untitled"
 
 
+_RESERVED_FLAGS = {"--dangerously-skip-permissions", "--output-format", "--verbose",
+                    "-p", "--print", "--append-system-prompt"}
+
+
 def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
     """Assemble the claude CLI invocation."""
     cmd = [cfg.claude_command, "--dangerously-skip-permissions",
            "--output-format", "stream-json", "--verbose"]
     if cfg.mcp_config.exists():
         cmd += ["--mcp-config", str(cfg.mcp_config.resolve())]
+    for flag in cfg.claude_flags:
+        if flag in _RESERVED_FLAGS:
+            print(f"[listener] Warning: passthrough flag '{flag}' conflicts with a "
+                  f"hardcoded flag and may cause unexpected behavior", file=sys.stderr)
     cmd += cfg.claude_flags
     if cfg.system_prompt.exists():
         cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
