@@ -71,7 +71,7 @@ uv run python -m zulipmcp.listener -- --strict-mcp-config --model opus
 | `--working-dir` | `.` | Working directory for spawned sessions |
 | `--claude-command` | `claude` | Claude CLI binary name or path |
 | `--log-dir` | `./logs` | Directory for session log files |
-| `-- ...` | *(none)* | Everything after `--` is forwarded to `claude` as-is (e.g. `-- --strict-mcp-config --model opus`) |
+| `-- ...` | *(none)* | Everything after `--` is forwarded to `claude` as-is |
 
 Each session gets `TRIGGER_MESSAGE_ID` and `SESSION_USER_EMAIL` set automatically so `set_context()` anchors to the @mention and hooks can identify the requester.
 
