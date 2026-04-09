@@ -20,17 +20,11 @@ _ALL_PRIVATE_STREAMS = "__ALL__"
 _dismiss_emoji: set[str] = {"stop_sign", "real-gun"}
 
 
-def _allowed_private_streams() -> set[str]:
-    """Return allowed private streams from env.
-
-    Security model:
-    - Unset/empty env => no private stream access (default-deny)
-    - "__ALL__" => explicit full private stream access
-    - list/string => explicit allowlist (normalized to lowercase)
-    """
-    raw = os.environ.get("BOT_ALLOWED_PRIVATE_STREAMS", "").strip()
+def _parse_stream_allowlist(env_var: str, default_all: bool) -> set[str]:
+    """Parse a stream allowlist env var into a lowercase set."""
+    raw = os.environ.get(env_var, "").strip()
     if not raw:
-        return set()
+        return {_ALL_PRIVATE_STREAMS} if default_all else set()
     if raw == _ALL_PRIVATE_STREAMS:
         return {_ALL_PRIVATE_STREAMS}
     try:
@@ -42,9 +36,30 @@ def _allowed_private_streams() -> set[str]:
                 return {_ALL_PRIVATE_STREAMS}
             return {parsed.lower()}
     except json.JSONDecodeError:
-        # Comma-separated fallback
         return {s.strip().lower() for s in raw.split(",") if s.strip()}
     return set()
+
+
+def _allowed_private_streams() -> set[str]:
+    """Return allowed private streams from env.
+
+    Security model:
+    - Unset/empty env => no private stream access (default-deny)
+    - "__ALL__" => explicit full private stream access
+    - list/string => explicit allowlist (normalized to lowercase)
+    """
+    return _parse_stream_allowlist("BOT_ALLOWED_PRIVATE_STREAMS", default_all=False)
+
+
+def _allowed_write_streams() -> set[str]:
+    """Return allowed write streams from env.
+
+    Security model:
+    - Unset/empty env => all stream writes allowed (backwards-compatible)
+    - "__ALL__" => explicit full write access
+    - list/string => explicit allowlist (normalized to lowercase)
+    """
+    return _parse_stream_allowlist("BOT_ALLOWED_WRITE_STREAMS", default_all=True)
 
 
 def is_private_stream_allowed(stream_name: str) -> bool:
@@ -52,6 +67,14 @@ def is_private_stream_allowed(stream_name: str) -> bool:
     if not is_stream_private(stream_name):
         return True
     allowed = _allowed_private_streams()
+    if _ALL_PRIVATE_STREAMS in allowed:
+        return True
+    return stream_name.lower() in allowed
+
+
+def is_stream_write_allowed(stream_name: str) -> bool:
+    """Whether the current process is allowed to send to this stream."""
+    allowed = _allowed_write_streams()
     if _ALL_PRIVATE_STREAMS in allowed:
         return True
     return stream_name.lower() in allowed
@@ -730,6 +753,10 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
 
 def send_message(stream: str, topic: str, content: str) -> dict:
     """Send a message. Returns API result dict with 'id' on success."""
+    if is_stream_private(stream) and not is_private_stream_allowed(stream):
+        return {"result": "error", "msg": f"Private stream access denied: {stream}"}
+    if not is_stream_write_allowed(stream):
+        return {"result": "error", "msg": f"Stream write access denied: {stream}"}
     return get_client().send_message({
         "type": "stream",
         "to": stream,
