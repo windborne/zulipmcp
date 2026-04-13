@@ -59,25 +59,17 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", text).strip("._") or "untitled"
 
 
-_RESERVED_FLAGS = {"--dangerously-skip-permissions", "--output-format", "--verbose",
-                    "-p", "--print", "--append-system-prompt"}
-
-
 def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
     """Assemble the claude CLI invocation."""
     cmd = [cfg.claude_command, "--dangerously-skip-permissions",
            "--output-format", "stream-json", "--verbose"]
     if cfg.mcp_config.exists():
         cmd += ["--mcp-config", str(cfg.mcp_config.resolve())]
-    for flag in cfg.claude_flags:
-        if flag in _RESERVED_FLAGS:
-            print(f"[listener] Warning: passthrough flag '{flag}' conflicts with a "
-                  f"hardcoded flag and may cause unexpected behavior", file=sys.stderr)
-    cmd += cfg.claude_flags
     if cfg.system_prompt.exists():
         cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
     cmd += ["-p", f"Call set_context('{stream}', '{topic}') to begin, "
                    f"then greet the user and listen for follow-ups."]
+    cmd += cfg.claude_flags
     return cmd
 
 
@@ -130,6 +122,15 @@ def run(cfg: Config):
         raise FileNotFoundError(
             f"Zulip config not found: {cfg.zuliprc} (expected .zuliprc in the current working directory)"
         )
+    if cfg.claude_flags:
+        saved = cfg.claude_flags
+        cfg.claude_flags = []
+        base_cmd = _build_cmd(cfg, "_", "_")
+        cfg.claude_flags = saved
+        for flag in cfg.claude_flags:
+            if flag in base_cmd:
+                print(f"[listener] WARNING: passthrough flag '{flag}' conflicts with a "
+                      f"hardcoded flag and may cause unexpected behavior", file=sys.stderr)
     client = zulip.Client(config_file=str(cfg.zuliprc))
     me = client.get_profile()["user_id"]
     print(f"[listener] Listening as user_id={me}, log_dir={cfg.log_dir}", file=sys.stderr)
