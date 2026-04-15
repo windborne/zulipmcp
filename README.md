@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/github/license/windborne/zulipmcp)](https://github.com/windborne/zulipmcp/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/downloads/)
 
-Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into concise XML suitable for LLM consumption. Usable as a Python library or as an [MCP](https://modelcontextprotocol.io/) server.
+Plug your AI agent into Zulip — read, reply, listen, and react over [MCP](https://modelcontextprotocol.io/). Also works as a Python library.
 
 <img width="1446" height="752" alt="zulipmcp in action" src="https://github.com/user-attachments/assets/6e6bbed7-ed19-4c4a-a9f2-48468dc9a570" />
 
@@ -133,10 +133,6 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
 | `ZULIPMCP_LOG_DIR` | Override the log directory (defaults to `/tmp/zulipmcp_logs`). |
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 

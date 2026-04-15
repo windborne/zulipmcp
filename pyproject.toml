@@ -1,7 +1,7 @@
 [project]
 name = "zulipmcp"
 version = "0.1.0"
-description = "MCP server for Zulip — real-time messaging, context management, and file handling for LLMs"
+description = "Plug your AI agent into Zulip — read, reply, listen, and react over MCP"
 license = "MIT"
 authors = [{name = "WindBorne Systems"}]
 requires-python = ">=3.10"
