@@ -1,16 +1,13 @@
 # zulipmcp
 
-<img width="1446" height="752" alt="image" src="https://github.com/user-attachments/assets/6e6bbed7-ed19-4c4a-a9f2-48468dc9a570" />
+[![License: MIT](https://img.shields.io/github/license/windborne/zulipmcp)](https://github.com/windborne/zulipmcp/blob/main/LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/downloads/)
 
+Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into concise XML suitable for LLM consumption. Usable as a Python library or as an [MCP](https://modelcontextprotocol.io/) server.
 
-Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into concise XML suitable for LLM consumption. Usable as a Python library or as an MCP server.
+<img width="1446" height="752" alt="zulipmcp in action" src="https://github.com/user-attachments/assets/6e6bbed7-ed19-4c4a-a9f2-48468dc9a570" />
 
-## Requirements
-
-- Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
-- A `.zuliprc` file in the project root for Zulip API auth
-
-## Using with Claude Code
+## Quickstart
 
 1. Install the package:
 
@@ -18,7 +15,7 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
    uv add zulipmcp --git https://github.com/windborne/zulipmcp.git
    ```
 
-2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Add a bot or integration](https://zulip.com/help/add-a-bot-or-integration) for instructions on making a bot. The bot type must be "generic"
+2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Add a bot or integration](https://zulip.com/help/add-a-bot-or-integration) for instructions on making a bot. The bot type must be "generic."
 
 3. Add the MCP server to your `.mcp.json`:
 
@@ -33,7 +30,12 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
    }
    ```
 
-4. Restart Claude Code. The Zulip tools should now be available.
+4. Restart your MCP client. The Zulip tools should now be available.
+
+## Requirements
+
+- Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
+- A `.zuliprc` file for Zulip API auth (see [Quickstart](#quickstart))
 
 ## Entry Points
 
@@ -43,15 +45,36 @@ Clean Zulip interface for LLMs. Fetches, caches, and formats Zulip messages into
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
 | `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns Claude Code sessions |
 
+## Library Usage
+
+zulipmcp can also be imported directly as a Python library:
+
+```python
+import zulipmcp
+
+# Fetch and format recent messages
+messages = zulipmcp.get_messages(hours_back=24, channels=["engineering"])
+print(zulipmcp.format_messages(messages))
+
+# Send a message
+zulipmcp.send_message("engineering", "general", "Hello from Python!")
+
+# Configure MCP hooks before starting the server
+zulipmcp.configure(
+    message_prefix=lambda: "[bot] ",
+    on_session_end=lambda session: print(f"Session ended in #{session.stream}"),
+)
+```
+
 ## Listener
 
-The optional `zulipmcp.listener` module watches Zulip for @mentions and spawns one headless Claude Code session per (stream, topic). It's the glue between Zulip events and Claude Code — the MCP server handles all the Zulip tools, the listener just handles lifecycle.
+The optional `zulipmcp.listener` module watches Zulip for @mentions and spawns one headless Claude Code session per (stream, topic). It's the glue between Zulip events and Claude Code -- the MCP server handles all the Zulip tools, the listener just handles lifecycle.
 
 ```bash
-# Minimal — uses ./.zuliprc, ./.mcp.json (if present), and the bundled default prompt
+# Minimal -- uses ./.zuliprc, ./.mcp.json (if present), and the bundled default prompt
 uv run python -m zulipmcp.listener
 
-# Full — override MCP config and system prompt
+# Full -- override MCP config and system prompt
 uv run python -m zulipmcp.listener \
     --mcp-config .mcp.json \
     --system-prompt agent.md \
@@ -75,9 +98,9 @@ uv run python -m zulipmcp.listener -- --strict-mcp-config --model opus
 
 Each session gets `TRIGGER_MESSAGE_ID` and `SESSION_USER_EMAIL` set automatically so `set_context()` anchors to the @mention and hooks can identify the requester.
 
-The listener is deliberately minimal (~90 lines of code). It omits concurrency caps, workspace isolation, staleness watchdogs, and dashboards — add those when you need them.
+The listener is deliberately minimal (~230 lines). It omits concurrency caps, workspace isolation, staleness watchdogs, and dashboards -- add those when you need them.
 
-## Key design details
+## Key Design Details
 
 ### Listening for messages
 
@@ -87,24 +110,34 @@ A `robot_ear` emoji is added to the last message as a visual indicator while lis
 
 ### No missed messages on reply
 
-When `reply` is called, it checks for new messages *before* sending. If anyone posted while the LLM was thinking, those messages are fetched and returned alongside the "message sent" confirmation. This way the LLM always sees what it missed and can react accordingly. The `last_seen_message_id` is updated to whichever is newest — the missed messages or the sent message — so nothing falls through the cracks.
+When `reply` is called, it checks for new messages *before* sending. If anyone posted while the LLM was thinking, those messages are fetched and returned alongside the "message sent" confirmation. This way the LLM always sees what it missed and can react accordingly. The `last_seen_message_id` is updated to whichever is newest -- the missed messages or the sent message -- so nothing falls through the cracks.
+
+### Session dismissal
+
+Users can dismiss a bot session by reacting with a configurable emoji (default: `:stop_sign:`) on any bot message. The dismiss check runs both during `listen()` (via reaction events) and before `reply()` (via REST API poll), covering the race condition where a user reacts while the bot is busy working. Customize with `configure(dismiss_emoji={"stop_sign", "wave"})`.
+
+### Bot visibility filtering
+
+Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages starting with `/nobots` or `/nb` are also filtered out. This lets humans have private conversations the bot won't see.
 
 ## Environment Variables
 
 | Variable | Description |
 |---|---|
+| `ZULIP_RC_PATH` | Absolute path to `.zuliprc`. Overrides the default (`./.zuliprc` in cwd). |
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
-| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset means no private-stream access. Accepts `__ALL__`, a JSON string/list, or a comma-separated list. |
-| `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset means writes are allowed everywhere for backwards compatibility. Accepts `__ALL__`, a JSON string/list, or a comma-separated list. |
-| `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only — the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. One message is fetched to anchor `last_seen_message_id` (needed for missed-message detection in `reply()` and catch-up in `listen()`); use `get_messages()` for full history. |
+| `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only -- the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
+| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. |
+| `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
+| `ZULIPMCP_LOG_DIR` | Override the log directory (defaults to `/tmp/zulipmcp_logs`). |
 
-## Logging
+## Contributing
 
-Logs are written to `/tmp/zulipmcp_logs` by default. Override with the `ZULIPMCP_LOG_DIR` environment variable.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
-## Style Notes
+## License
 
-Keep code in core.py elegant, short, and simple.
+[MIT](LICENSE)
