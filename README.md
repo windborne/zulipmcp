@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/github/license/windborne/zulipmcp)](https://github.com/windborne/zulipmcp/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/downloads/)
 
-Plug your AI agent into Zulip — read, reply, listen, and react over [MCP](https://modelcontextprotocol.io/). Also works as a Python library.
+Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://modelcontextprotocol.io/) client. Also works as a Python library.
 
 <img width="1446" height="752" alt="zulipmcp in action" src="https://github.com/user-attachments/assets/6e6bbed7-ed19-4c4a-a9f2-48468dc9a570" />
 
