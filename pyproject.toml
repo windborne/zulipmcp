@@ -1,10 +1,23 @@
 [project]
 name = "zulipmcp"
 version = "0.1.0"
-description = "Clean Zulip MCP interface for LLMs"
+description = "Run AI agents in Zulip as @mentionable bots — or wire into any MCP client"
 license = "MIT"
 authors = [{name = "WindBorne Systems"}]
 requires-python = ">=3.10"
+readme = "README.md"
+keywords = ["zulip", "mcp", "model-context-protocol", "llm", "claude", "chatbot"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Typing :: Typed",
+]
 dependencies = [
     "diskcache",
     "fastmcp",
@@ -14,6 +27,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/windborne/zulipmcp"
 Repository = "https://github.com/windborne/zulipmcp"
+Issues = "https://github.com/windborne/zulipmcp/issues"
 
 [tool.setuptools.packages.find]
 include = ["zulipmcp*"]
