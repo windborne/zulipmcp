@@ -639,16 +639,15 @@ def list_streams(fields: list[str] | None = None) -> str:
     streams = zulip_core.list_streams(include_private=True)
     if not streams:
         return "No streams found."
-    extras = fields or []
     lines = []
     for s in streams:
         visibility = "[private]" if s.get("invite_only", False) else "[public]"
         line = f"- {visibility} #{s['name']}"
         if s.get("description"):
             line += f": {s['description']}"
-        if extras:
+        if fields:
             line += " | " + " ".join(
-                _format_stream_field(f, s.get(f)) for f in extras
+                _format_stream_field(f, s.get(f)) for f in fields
             )
         lines.append(line)
     return f"Found {len(streams)} streams:\n\n" + "\n".join(lines)
