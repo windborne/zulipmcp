@@ -14,11 +14,12 @@ Bot visibility filtering:
     This allows humans to have private conversations that the bot won't see or respond to.
 """
 
+import json
 import time
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
@@ -606,18 +607,49 @@ sign_off = end_session
 # Read tools — browsing and searching
 # ============================================================================
 
+def _format_stream_field(key: str, value: object) -> str:
+    if isinstance(value, (dict, list)):
+        s = json.dumps(value, separators=(",", ":"), default=str)
+        if len(s) > 80:
+            s = s[:77] + "..."
+        return f"{key}={s}"
+    if key == "date_created" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            iso = datetime.fromtimestamp(value, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            return f"{key}={iso}"
+        except (OSError, OverflowError, ValueError):
+            pass
+    return f"{key}={value}"
+
+
 @mcp.tool()
-def list_streams() -> str:
-    """List all available Zulip streams/channels (public and private)."""
+def list_streams(fields: list[str] | None = None) -> str:
+    """List all available Zulip streams/channels (public and private).
+
+    Args:
+        fields: Optional list of field names from the Zulip ``GET /streams``
+            response to include per stream, e.g.
+            ``["date_created", "subscriber_count"]``. Missing keys render as
+            ``None``. ``date_created`` is formatted as ISO UTC. Nested
+            dict/list values render as compact JSON, truncated at 80 chars.
+            Default (``None``) returns the compact one-line-per-stream format.
+    """
     streams = zulip_core.list_streams(include_private=True)
     if not streams:
         return "No streams found."
+    extras = fields or []
     lines = []
     for s in streams:
         visibility = "[private]" if s.get("invite_only", False) else "[public]"
         line = f"- {visibility} #{s['name']}"
         if s.get("description"):
             line += f": {s['description']}"
+        if extras:
+            line += " | " + " ".join(
+                _format_stream_field(f, s.get(f)) for f in extras
+            )
         lines.append(line)
     return f"Found {len(streams)} streams:\n\n" + "\n".join(lines)
 
