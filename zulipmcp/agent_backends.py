@@ -24,19 +24,6 @@ class LaunchConfig(Protocol):
 
 CODEX_MCP_TOOL_TIMEOUT_SEC = 10_800
 
-ZULIPMCP_ENV_VARS = (
-    "ZULIP_RC_PATH",
-    "TRIGGER_MESSAGE_ID",
-    "SESSION_USER_EMAIL",
-    "BOT_ALLOWED_PRIVATE_STREAMS",
-    "BOT_ALLOWED_WRITE_STREAMS",
-    "ZULIPMCP_CACHE_DIR",
-    "ZULIPMCP_LOG_DIR",
-    "WORKSPACE_PATH",
-    "SESSION_STREAM",
-    "SESSION_TOPIC",
-)
-
 _BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -192,7 +179,6 @@ def _codex_mcp_config_args(path: Path, env: MutableMapping[str, str]) -> list[st
             )
 
         prefix = _config_key("mcp_servers", str(name))
-        is_zulip = _is_zulip_server(str(name), server)
 
         if "command" in server:
             args += _codex_config_arg(
@@ -217,9 +203,6 @@ def _codex_mcp_config_args(path: Path, env: MutableMapping[str, str]) -> list[st
                 env[key] = _expand_env(str(value), env)
                 _append_unique(env_vars, key)
             _append_inherited_env_vars(env_vars, env)
-            if is_zulip:
-                for key in ZULIPMCP_ENV_VARS:
-                    _append_unique(env_vars, key)
             if env_vars:
                 args += _codex_config_arg(f"{prefix}.env_vars", env_vars)
         elif "url" in server:
@@ -254,22 +237,14 @@ def _codex_mcp_config_args(path: Path, env: MutableMapping[str, str]) -> list[st
 
         if "required" in server:
             args += _codex_config_arg(f"{prefix}.required", server["required"])
-        elif is_zulip:
-            args += _codex_config_arg(f"{prefix}.required", True)
 
-        tool_timeout = server.get("tool_timeout_sec")
-        if is_zulip:
-            tool_timeout = max(_int_or_default(tool_timeout, 0), CODEX_MCP_TOOL_TIMEOUT_SEC)
-        if tool_timeout is not None:
-            args += _codex_config_arg(f"{prefix}.tool_timeout_sec", tool_timeout)
+        tool_timeout = max(
+            _int_or_default(server.get("tool_timeout_sec"), 0),
+            CODEX_MCP_TOOL_TIMEOUT_SEC,
+        )
+        args += _codex_config_arg(f"{prefix}.tool_timeout_sec", tool_timeout)
 
     return args
-
-
-def _is_zulip_server(name: str, server: dict[str, Any]) -> bool:
-    haystack = [name, str(server.get("command", ""))]
-    haystack.extend(str(v) for v in _as_list(server.get("args", [])))
-    return "zulipmcp" in " ".join(haystack).lower() or name.lower() == "zulip"
 
 
 def _header_env_map(
