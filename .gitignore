@@ -7,3 +7,4 @@ zuliprc
 reference_repos/
 build/
 *.egg-info/
+logs/

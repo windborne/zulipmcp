@@ -12,6 +12,7 @@
 
 - **`core.py`** — Zulip API wrappers. No MCP dependency. Returns Python objects.
 - **`mcp.py`** — MCP tool layer + `SessionState`. Thin wrappers over `core.py`. Hooks system lives here.
+- **`agent_backends.py`** — Claude/Codex command builders for the listener. No Zulip API dependency.
 
 Separation is load-bearing: `core.py` must stay MCP-agnostic so it works as a standalone library import.
 
@@ -24,3 +25,4 @@ Separation is load-bearing: `core.py` must stay MCP-agnostic so it works as a st
 - **Two dismiss-check paths exist intentionally.** `listen()` catches via events, `reply()` via REST poll. Both needed — user might react during tool execution (not listening).
 - **Private stream security is asymmetric on purpose.** Unset `BOT_ALLOWED_PRIVATE_STREAMS` = no access (default-deny). Unset `BOT_ALLOWED_WRITE_STREAMS` = all writes allowed (backwards-compat). Don't "fix" the asymmetry.
 - **`configure()` must be called before `run_server()`.** `run_server()` may auto-init a session that reads hook state.
+- **Codex MCP config is not `.mcp.json` native.** The listener translates `.mcp.json` into Codex `-c mcp_servers...` overrides. Keep secrets in env/header fields; env refs in command/args/cwd/url must fail closed to avoid argv leaks.

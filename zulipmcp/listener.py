@@ -1,4 +1,4 @@
-"""Listen for Zulip @mentions and spawn one Claude session per (stream, topic).
+"""Listen for Zulip @mentions and spawn one agent session per (stream, topic).
 
 Defaults:
 - `./.zuliprc` from the current working directory
@@ -7,7 +7,7 @@ Defaults:
 """
 
 import argparse
-import os
+import json
 import re
 import subprocess
 import sys
@@ -18,6 +18,7 @@ from pathlib import Path
 
 import zulip
 
+from .agent_backends import build_agent_cmd, build_agent_env
 from . import core as zulip_core
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -34,14 +35,20 @@ PRIVATE_STREAM_NOT_INVITED = (
 class Config:
     """CLI args map 1:1 to fields."""
     zuliprc: Path
+    backend: str = "claude"
+    agent_command: str | None = None
     mcp_config: Path = Path(".mcp.json")
     system_prompt: Path = DEFAULT_SYSTEM_PROMPT_PATH
     working_dir: Path = Path(".")
-    claude_command: str = "claude"
     log_dir: Path = Path("./logs")
-    claude_flags: list[str] = field(default_factory=list)
+    codex_permission_mode: str = "parity"
+    backend_flags: list[str] = field(default_factory=list)
 
     def __post_init__(self):
+        if self.backend not in {"claude", "codex"}:
+            raise ValueError(f"Unsupported backend: {self.backend!r}")
+        if self.agent_command is None:
+            self.agent_command = self.backend
         self.zuliprc = Path(self.zuliprc)
         self.mcp_config = Path(self.mcp_config)
         self.system_prompt = Path(self.system_prompt)
@@ -56,35 +63,12 @@ _lock = threading.Lock()
 
 def _slug(text: str) -> str:
     """Sanitize user-controlled names for filenames."""
-    return re.sub(r"[^a-zA-Z0-9._-]+", "_", text).strip("._") or "untitled"
-
-
-def _build_cmd(cfg: Config, stream: str, topic: str) -> list[str]:
-    """Assemble the claude CLI invocation."""
-    cmd = [cfg.claude_command, "--dangerously-skip-permissions",
-           "--output-format", "stream-json", "--verbose"]
-    if cfg.mcp_config.exists():
-        cmd += ["--mcp-config", str(cfg.mcp_config.resolve())]
-    if cfg.system_prompt.exists():
-        cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
-    cmd += ["-p", f"Call set_context('{stream}', '{topic}') to begin, "
-                   f"then greet the user and listen for follow-ups."]
-    cmd += cfg.claude_flags
-    return cmd
-
-
-def _build_env(cfg: Config, msg: dict) -> dict:
-    """Set env vars that zulipmcp reads on the other side."""
-    env = os.environ.copy()
-    env["ZULIP_RC_PATH"] = str(cfg.zuliprc.resolve())
-    env["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] = "10800000"  # 3 hours
-    env["TRIGGER_MESSAGE_ID"] = str(msg["id"])
-    env["SESSION_USER_EMAIL"] = msg.get("sender_email", "")
-    return env
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", text).strip("._") or "untitled"
+    return slug[:100]
 
 
 def _spawn(cfg: Config, msg: dict):
-    """Launch a Claude Code session for this message, if not already running."""
+    """Launch an agent session for this message, if not already running."""
     stream, topic = msg["display_recipient"], msg["subject"]
     key = (stream.lower(), topic.lower())
 
@@ -97,12 +81,28 @@ def _spawn(cfg: Config, msg: dict):
     ts = time.strftime("%Y%m%d_%H%M%S")
     log_path = cfg.log_dir / f"{ts}_{_slug(key[0])}_{_slug(key[1])}.jsonl"
     fh = open(log_path, "w")
-
-    proc = subprocess.Popen(
-        _build_cmd(cfg, stream, topic),
-        cwd=cfg.working_dir, env=_build_env(cfg, msg),
-        stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-    )
+    try:
+        env = build_agent_env(cfg, msg)
+        cmd = build_agent_cmd(cfg, stream, topic, env)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cfg.working_dir, env=env,
+            stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"type": "launcher.error", "backend": cfg.backend, "error": str(exc)}
+            ),
+            file=fh,
+        )
+        fh.close()
+        print(
+            f"[listener] Failed to spawn {cfg.backend} session for #{stream} > {topic}: "
+            f"{exc} (see {log_path})",
+            file=sys.stderr,
+        )
+        return
     with _lock:
         _sessions[key] = proc
 
@@ -113,27 +113,42 @@ def _spawn(cfg: Config, msg: dict):
             _sessions.pop(key, None)
 
     threading.Thread(target=reap, daemon=True, name=f"reap:{key[0]}/{key[1]}").start()
-    print(f"[listener] Spawned session for #{stream} > {topic} (pid={proc.pid})", file=sys.stderr)
+    print(
+        f"[listener] Spawned {cfg.backend} session for #{stream} > {topic} (pid={proc.pid})",
+        file=sys.stderr,
+    )
 
 
 def run(cfg: Config):
     """Block forever, dispatching @mentions to _spawn()."""
     if not cfg.zuliprc.exists():
         raise FileNotFoundError(
-            f"Zulip config not found: {cfg.zuliprc} (expected .zuliprc in the current working directory)"
+            f"Zulip config not found: {cfg.zuliprc} "
+            "(set --zuliprc or place .zuliprc in the current working directory)"
         )
-    if cfg.claude_flags:
-        saved = cfg.claude_flags
-        cfg.claude_flags = []
-        base_cmd = _build_cmd(cfg, "_", "_")
-        cfg.claude_flags = saved
-        for flag in cfg.claude_flags:
-            if flag in base_cmd:
-                print(f"[listener] WARNING: passthrough flag '{flag}' conflicts with a "
-                      f"hardcoded flag and may cause unexpected behavior", file=sys.stderr)
+    if cfg.backend_flags:
+        saved = cfg.backend_flags
+        try:
+            cfg.backend_flags = []
+            base_env = build_agent_env(cfg, {"id": 0, "sender_email": ""})
+            base_cmd = build_agent_cmd(cfg, "_", "_", base_env)
+            for flag in saved:
+                if flag.startswith("--") and flag in base_cmd:
+                    print(f"[listener] WARNING: passthrough flag '{flag}' conflicts with a "
+                          f"hardcoded flag and may cause unexpected behavior", file=sys.stderr)
+        except Exception as exc:
+            print(
+                f"[listener] WARNING: could not check passthrough flag conflicts: {exc}",
+                file=sys.stderr,
+            )
+        finally:
+            cfg.backend_flags = saved
     client = zulip.Client(config_file=str(cfg.zuliprc))
     me = client.get_profile()["user_id"]
-    print(f"[listener] Listening as user_id={me}, log_dir={cfg.log_dir}", file=sys.stderr)
+    print(
+        f"[listener] Listening as user_id={me}, backend={cfg.backend}, log_dir={cfg.log_dir}",
+        file=sys.stderr,
+    )
 
     def _is_subscribed(stream_name: str) -> bool:
         """Check if the bot is subscribed to a stream."""
@@ -201,13 +216,17 @@ def run(cfg: Config):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Zulip → Claude Code listener",
+        description="Zulip agent listener",
         epilog="See zulipmcp README for full setup instructions.",
     )
     p.add_argument("--zuliprc", default=".zuliprc",
                    help="Path to .zuliprc (default: ./.zuliprc)")
+    p.add_argument("--backend", choices=["claude", "codex"], default="claude",
+                   help="Agent backend to spawn (default: claude)")
+    p.add_argument("--agent-command", default=None,
+                   help="Agent CLI binary name/path (default: backend name)")
     p.add_argument("--mcp-config", default=".mcp.json",
-                   help="Path to .mcp.json for Claude (default: ./.mcp.json if present)")
+                   help="Path to .mcp.json for agent sessions (default: ./.mcp.json if present)")
     p.add_argument(
         "--system-prompt",
         default=str(DEFAULT_SYSTEM_PROMPT_PATH),
@@ -217,17 +236,26 @@ def main():
         ),
     )
     p.add_argument("--working-dir", default=".", help="Working directory for sessions")
-    p.add_argument("--claude-command", default="claude", help="Claude CLI binary name")
     p.add_argument("--log-dir", default="./logs", help="Session log directory")
     p.add_argument(
-        "claude_flags", nargs=argparse.REMAINDER,
-        help="Additional flags forwarded to Claude Code (place after --)",
+        "--codex-permission-mode",
+        choices=["parity", "workspace-write", "read-only", "none"],
+        default="parity",
+        help=(
+            "Codex permission preset: parity uses --yolo for full bypass like the Claude default; "
+            "workspace-write/read-only use noninteractive sandboxed modes; none adds no flags "
+            "(default: parity)"
+        ),
+    )
+    p.add_argument(
+        "backend_flags", nargs=argparse.REMAINDER,
+        help="Additional flags forwarded to the selected backend (place after --)",
     )
     a = p.parse_args()
-    flags = a.claude_flags or []
+    flags = a.backend_flags or []
     if flags and flags[0] == "--":
         flags = flags[1:]
-    a.claude_flags = flags
+    a.backend_flags = flags
     run(Config(**vars(a)))
 
 

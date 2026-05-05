@@ -36,14 +36,15 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 
 - Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
 - A `.zuliprc` file for Zulip API auth (see [Quickstart](#quickstart))
+- For listener mode: the selected backend CLI installed and authenticated (`claude` by default, or `codex` with `--backend codex`)
 
 ## Entry Points
 
 | Entry Point | Description |
 |---|---|
-| `uv run python -m zulipmcp.mcp` | MCP server for Claude Code / MCP clients |
+| `uv run python -m zulipmcp.mcp` | MCP server for Claude Code, Codex, and other MCP clients |
 | `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
-| `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns Claude Code sessions |
+| `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns agent sessions |
 
 ## Library Usage
 
@@ -68,7 +69,7 @@ zulipmcp.configure(
 
 ## Listener
 
-The optional `zulipmcp.listener` module watches Zulip for @mentions and spawns one headless Claude Code session per (stream, topic). It's the glue between Zulip events and Claude Code -- the MCP server handles all the Zulip tools, the listener just handles lifecycle.
+The optional `zulipmcp.listener` module watches Zulip for @mentions and spawns one headless agent session per (stream, topic). It supports Claude Code by default and Codex with `--backend codex`. It's the glue between Zulip events and the agent backend -- the MCP server handles all the Zulip tools, the listener just handles lifecycle.
 
 ```bash
 # Minimal -- uses ./.zuliprc, ./.mcp.json (if present), and the bundled default prompt
@@ -80,8 +81,17 @@ uv run python -m zulipmcp.listener \
     --system-prompt agent.md \
     --log-dir ./logs
 
-# Pass flags through to Claude Code (everything after --)
-uv run python -m zulipmcp.listener -- --strict-mcp-config --model opus
+# Recommended: Claude Code with Opus 4.6
+uv run python -m zulipmcp.listener -- --model claude-opus-4-6
+
+# Recommended: Codex with GPT-5.5 and medium reasoning
+uv run python -m zulipmcp.listener --backend codex -- \
+    --model gpt-5.5 \
+    -c 'model_reasoning_effort="medium"'
+
+# Pass additional backend-specific flags after --
+uv run python -m zulipmcp.listener -- --strict-mcp-config --effort medium
+uv run python -m zulipmcp.listener --backend codex -- -c 'model_verbosity="low"'
 ```
 
 **Flags:**
@@ -89,16 +99,24 @@ uv run python -m zulipmcp.listener -- --strict-mcp-config --model opus
 | Flag | Default | Description |
 |---|---|---|
 | `--zuliprc` | `./.zuliprc` | Path to `.zuliprc` (resolved relative to current working directory) |
-| `--mcp-config` | `./.mcp.json` | Path to `.mcp.json` for Claude Code sessions (used only if the file exists) |
-| `--system-prompt` | `zulipmcp/default_system_prompt.md` | Appended system prompt file (default path is resolved relative to `listener.py`, not the current working directory) |
+| `--backend` | `claude` | Agent backend to launch: `claude` or `codex` |
+| `--agent-command` | backend name | Backend CLI binary name or path |
+| `--mcp-config` | `./.mcp.json` | Path to `.mcp.json` for agent sessions (used only if the file exists). Codex runs translate supported `command` and `url` servers into one-run `-c mcp_servers...` overrides. |
+| `--system-prompt` | `zulipmcp/default_system_prompt.md` | System prompt file. Claude receives it as an appended system prompt; Codex receives it as developer instructions. |
 | `--working-dir` | `.` | Working directory for spawned sessions |
-| `--claude-command` | `claude` | Claude CLI binary name or path |
 | `--log-dir` | `./logs` | Directory for session log files |
-| `-- ...` | *(none)* | Everything after `--` is forwarded to `claude` as-is |
+| `--codex-permission-mode` | `parity` | Codex-only permission preset. `parity` uses `--yolo` for full bypass like the Claude default and assumes external sandboxing; `workspace-write` and `read-only` use noninteractive sandboxed modes; `none` adds no permission flags. |
+| `-- ...` | *(none)* | Everything after `--` is forwarded to the selected backend as-is. For Codex, known top-level-only flags are placed before `exec` automatically. |
 
 Each session gets `TRIGGER_MESSAGE_ID` and `SESSION_USER_EMAIL` set automatically so `set_context()` anchors to the @mention and hooks can identify the requester.
 
-The listener is deliberately minimal (~230 lines). It omits concurrency caps, workspace isolation, staleness watchdogs, and dashboards -- add those when you need them.
+The listener intentionally does not set model or reasoning defaults. Backend CLIs and model aliases move over time, so use the backend's user config or pass flags after `--`. For reproducible production behavior, pin exact backend model IDs in your deployment config instead of relying on aliases.
+
+Custom `--system-prompt` files are backend instructions, not the initial task. The listener still sends a short per-session bootstrap prompt with the target stream/topic and the Zulip lifecycle contract: initialize context, send visible text through `reply()`, then call `listen()` when yielding for follow-ups.
+
+Codex sessions launch with web search enabled to match Claude Code's default web-fetch capability. For Codex, the `.mcp.json` adapter whitelists inherited environment variable names for translated stdio MCP servers, mirroring Claude-style subprocess inheritance without putting env values in argv. It also forwards Zulip's direct auto-init `SESSION_STREAM`/`SESSION_TOPIC` pair when present and sets `tool_timeout_sec` to at least 3 hours so the long-running `listen()` tool can wait for follow-ups. The adapter is intentionally conservative: Claude SSE config is rejected, only `command` and streamable HTTP `url` servers are translated, and environment placeholders are supported only in env/header values that can stay out of process argv.
+
+The listener is deliberately minimal. It omits concurrency caps, workspace isolation, staleness watchdogs, and dashboards -- add those when you need them.
 
 ## Key Design Details
 
@@ -124,7 +142,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 
 | Variable | Description |
 |---|---|
-| `ZULIP_RC_PATH` | Absolute path to `.zuliprc`. Overrides the default (`./.zuliprc` in cwd). |
+| `ZULIP_RC_PATH` | Absolute path to `.zuliprc` for direct MCP server use. Listener mode sets this for spawned sessions from `--zuliprc`; it does not read ambient `ZULIP_RC_PATH` as its own default. |
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
 | `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only -- the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |
