@@ -304,6 +304,8 @@ def _normalize_env_vars(value: object) -> list[object]:
 
 
 def _append_inherited_env_vars(env_vars: list[object], env: MutableMapping[str, str]) -> None:
+    # Codex stdio servers see only whitelisted vars; mirror full parent env
+    # for subprocess parity with Claude's Popen inheritance.
     for key in sorted(env):
         if key:
             _append_unique(env_vars, key)
