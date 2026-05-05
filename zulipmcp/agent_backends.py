@@ -6,7 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import MutableMapping, Protocol
+from typing import Any, MutableMapping, Protocol
 
 
 class LaunchConfig(Protocol):
@@ -58,7 +58,7 @@ def bootstrap_prompt(stream: str, topic: str) -> str:
     )
 
 
-def build_agent_env(cfg: LaunchConfig, msg: dict) -> dict[str, str]:
+def build_agent_env(cfg: LaunchConfig, msg: dict[str, Any]) -> dict[str, str]:
     """Set environment variables that zulipmcp reads in the MCP server."""
     env = os.environ.copy()
     env["ZULIP_RC_PATH"] = str(cfg.zuliprc.resolve())
@@ -266,7 +266,7 @@ def _codex_mcp_config_args(path: Path, env: MutableMapping[str, str]) -> list[st
     return args
 
 
-def _is_zulip_server(name: str, server: dict) -> bool:
+def _is_zulip_server(name: str, server: dict[str, Any]) -> bool:
     haystack = [name, str(server.get("command", ""))]
     haystack.extend(str(v) for v in _as_list(server.get("args", [])))
     return "zulipmcp" in " ".join(haystack).lower() or name.lower() == "zulip"
@@ -365,7 +365,7 @@ def _toml_value(value: object) -> str:
     raise TypeError(f"Cannot encode {type(value).__name__} as TOML")
 
 
-def _as_list(value: object) -> list:
+def _as_list(value: object) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, list):

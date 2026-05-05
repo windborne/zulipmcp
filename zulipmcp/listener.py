@@ -6,6 +6,8 @@ Defaults:
 - bundled `default_system_prompt.md` (resolved relative to this file)
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import re
@@ -15,6 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import zulip
 
@@ -67,7 +70,7 @@ def _slug(text: str) -> str:
     return slug[:100]
 
 
-def _spawn(cfg: Config, msg: dict):
+def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
     """Launch an agent session for this message, if not already running."""
     stream, topic = msg["display_recipient"], msg["subject"]
     key = (stream.lower(), topic.lower())
