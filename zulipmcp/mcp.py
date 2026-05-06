@@ -488,16 +488,17 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             if _interrupt_dir:
                 _interrupt_path = Path(_interrupt_dir) / ".listen_interrupt"
                 try:
-                    if _interrupt_path.exists():
-                        _interrupt_content = _interrupt_path.read_text()
-                        _interrupt_path.unlink(missing_ok=True)
-                        _logger.info("listen() interrupted by .listen_interrupt file")
-                        return (
-                            "External event interrupted listen(). "
-                            "Handle the event below, then listen() again "
-                            "if you're waiting for follow-up.\n\n"
-                            + _interrupt_content
-                        )
+                    _interrupt_content = _interrupt_path.read_text()
+                    _interrupt_path.unlink(missing_ok=True)
+                    _logger.info("listen() interrupted by .listen_interrupt file")
+                    return (
+                        "External event interrupted listen(). "
+                        "Handle the event below, then listen() again "
+                        "if you're waiting for follow-up.\n\n"
+                        + _interrupt_content
+                    )
+                except FileNotFoundError:
+                    pass
                 except Exception:
                     _logger.debug("listen() interrupt file check failed", exc_info=True)
 
