@@ -141,12 +141,15 @@ def _opencode_mcp_servers(
 
         if "command" in server:
             oc["type"] = "local"
-            command_parts = [str(server["command"])]
-            command_parts += [str(a) for a in _as_list(server.get("args"))]
+            command_parts = [_reject_argv_env_refs(str(server["command"]), path, name, "command")]
+            command_parts += [
+                _reject_argv_env_refs(str(a), path, name, "args")
+                for a in _as_list(server.get("args"))
+            ]
             oc["command"] = command_parts
         elif "url" in server:
             oc["type"] = "remote"
-            oc["url"] = str(server["url"])
+            oc["url"] = _reject_argv_env_refs(str(server["url"]), path, name, "url")
             headers = _env_map(server.get("headers"))
             if headers:
                 oc["headers"] = {k: _expand_env(v, env) for k, v in headers.items()}
@@ -393,9 +396,8 @@ def _reject_argv_env_refs(value: str, path: Path, server_name: str, field: str) 
         return value
     raise ValueError(
         f"MCP server {server_name!r} in {path} uses ${{{match.group(1)}}} in {field}. "
-        "Codex .mcp.json translation cannot expand environment variables in command, "
-        "args, cwd, or url because those values are passed through process argv. "
-        "Move secrets into env, headers, env_http_headers, or bearer_token_env_var."
+        "The .mcp.json translation does not expand environment variables in command, "
+        "args, cwd, or url. Move secrets into the env block or header fields."
     )
 
 

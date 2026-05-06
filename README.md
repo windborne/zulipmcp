@@ -99,6 +99,7 @@ uv run python -m zulipmcp.listener --backend opencode \
 # Pass additional backend-specific flags after --
 uv run python -m zulipmcp.listener -- --strict-mcp-config --effort medium
 uv run python -m zulipmcp.listener --backend codex -- -c 'model_verbosity="low"'
+uv run python -m zulipmcp.listener --backend opencode -- --verbose
 ```
 
 **Flags:**
@@ -125,7 +126,7 @@ Custom `--system-prompt` files are backend instructions, not the initial task. T
 
 Codex sessions launch with web search enabled to match Claude Code's default web-fetch capability. For Codex, the `.mcp.json` adapter whitelists inherited environment variable names for translated stdio MCP servers, mirroring Claude-style subprocess inheritance without putting env values in argv. It also forwards Zulip's direct auto-init `SESSION_STREAM`/`SESSION_TOPIC` pair when present and sets `tool_timeout_sec` to at least 3 hours so the long-running `listen()` tool can wait for follow-ups. The adapter is intentionally conservative: Claude SSE config is rejected, only `command` and streamable HTTP `url` servers are translated, and environment placeholders are supported only in env/header values that can stay out of process argv.
 
-OpenCode sessions receive the full config via `OPENCODE_CONFIG_CONTENT` (inline JSON). The `.mcp.json` adapter translates `command`-based servers to OpenCode's `local` type (merging `command`+`args` into a single array) and `url`-based servers to `remote` type, renaming `env` to `environment`. Each translated server gets a 3-hour MCP timeout so `listen()` can block for follow-ups; `listen()` sends MCP progress notifications during its long-poll loop, which resets OpenCode's per-call timeout. The system prompt file path is passed via the `instructions` config field.
+OpenCode sessions receive the full config via `OPENCODE_CONFIG_CONTENT` (inline JSON). The `.mcp.json` adapter translates `command`-based servers to OpenCode's `local` type (merging `command`+`args` into a single array) and `url`-based servers to `remote` type, renaming `env` to `environment`. Each translated server gets a 3-hour MCP timeout so `listen()` can block for follow-ups; `listen()` sends MCP progress notifications during its long-poll loop, which OpenCode uses to reset its per-call timeout. The system prompt file path is passed via the `instructions` config field.
 
 The listener is deliberately minimal. It omits concurrency caps, workspace isolation, staleness watchdogs, and dashboards -- add those when you need them.
 
