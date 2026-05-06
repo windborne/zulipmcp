@@ -446,10 +446,16 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
         deadline = start + timeout_seconds
         loop = asyncio.get_event_loop()
 
+        # Shorten poll cycles when interrupt file monitoring is active
+        # so external events are detected within ~10s instead of ~90s.
+        _interrupt_dir = os.environ.get("WORKSPACE_PATH", "")
+        _interrupt_path = Path(_interrupt_dir) / ".listen_interrupt" if _interrupt_dir else None
+        _max_poll = 10 if _interrupt_dir else longpoll_timeout
+
         while time.time() < deadline:
             # Long-poll in a thread so we can interleave MCP keepalives.
             remaining = deadline - time.time()
-            poll_timeout = min(longpoll_timeout, max(int(remaining), 1))
+            poll_timeout = min(_max_poll, max(int(remaining), 1))
 
             try:
                 messages, reactions, last_event_id = await loop.run_in_executor(
@@ -484,9 +490,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                 return _build_listen_response(visible, listen_msg_id)
 
             # Check for external interrupt signal (file-based IPC).
-            _interrupt_dir = os.environ.get("WORKSPACE_PATH", "")
-            if _interrupt_dir:
-                _interrupt_path = Path(_interrupt_dir) / ".listen_interrupt"
+            if _interrupt_path:
                 try:
                     _interrupt_content = _interrupt_path.read_text()
                     _interrupt_path.unlink(missing_ok=True)
