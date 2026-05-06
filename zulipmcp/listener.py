@@ -45,10 +45,12 @@ class Config:
     working_dir: Path = Path(".")
     log_dir: Path = Path("./logs")
     codex_permission_mode: str = "parity"
+    opencode_model: str = ""
+    opencode_agent: str = ""
     backend_flags: list[str] = field(default_factory=list)
 
     def __post_init__(self):
-        if self.backend not in {"claude", "codex"}:
+        if self.backend not in {"claude", "codex", "opencode"}:
             raise ValueError(f"Unsupported backend: {self.backend!r}")
         if self.agent_command is None:
             self.agent_command = self.backend
@@ -224,7 +226,7 @@ def main():
     )
     p.add_argument("--zuliprc", default=".zuliprc",
                    help="Path to .zuliprc (default: ./.zuliprc)")
-    p.add_argument("--backend", choices=["claude", "codex"], default="claude",
+    p.add_argument("--backend", choices=["claude", "codex", "opencode"], default="claude",
                    help="Agent backend to spawn (default: claude)")
     p.add_argument("--agent-command", default=None,
                    help="Agent CLI binary name/path (default: backend name)")
@@ -249,6 +251,14 @@ def main():
             "workspace-write/read-only use noninteractive sandboxed modes; none adds no flags "
             "(default: parity)"
         ),
+    )
+    p.add_argument(
+        "--opencode-model", default="",
+        help="OpenCode model in provider/model format (e.g. 'anthropic/claude-sonnet-4-5')",
+    )
+    p.add_argument(
+        "--opencode-agent", default="",
+        help="OpenCode agent name (passed as --agent)",
     )
     p.add_argument(
         "backend_flags", nargs=argparse.REMAINDER,

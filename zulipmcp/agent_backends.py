@@ -20,9 +20,12 @@ class LaunchConfig(Protocol):
     working_dir: Path
     backend_flags: list[str]
     codex_permission_mode: str
+    opencode_model: str
+    opencode_agent: str
 
 
 CODEX_MCP_TOOL_TIMEOUT_SEC = 10_800
+OPENCODE_MCP_TIMEOUT_MS = 10_800_000
 
 _BARE_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -49,10 +52,12 @@ def build_agent_env(cfg: LaunchConfig, msg: dict[str, Any]) -> dict[str, str]:
     """Set environment variables that zulipmcp reads in the MCP server."""
     env = os.environ.copy()
     env["ZULIP_RC_PATH"] = str(cfg.zuliprc.resolve())
-    if cfg.backend == "claude":
-        env["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] = "10800000"  # 3 hours
     env["TRIGGER_MESSAGE_ID"] = str(msg["id"])
     env["SESSION_USER_EMAIL"] = msg.get("sender_email", "")
+    if cfg.backend == "claude":
+        env["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] = "10800000"  # 3 hours
+    elif cfg.backend == "opencode":
+        env["OPENCODE_CONFIG_CONTENT"] = _opencode_config_json(cfg, env)
     return env
 
 
@@ -69,6 +74,8 @@ def build_agent_cmd(
         if env is None:
             env = os.environ.copy()
         return _build_codex_cmd(cfg, stream, topic, env)
+    if cfg.backend == "opencode":
+        return _build_opencode_cmd(cfg, stream, topic)
     raise ValueError(f"Unsupported backend: {cfg.backend!r}")
 
 
@@ -87,6 +94,90 @@ def _build_claude_cmd(cfg: LaunchConfig, stream: str, topic: str) -> list[str]:
     cmd += ["-p", bootstrap_prompt(stream, topic)]
     cmd += cfg.backend_flags
     return cmd
+
+
+def _build_opencode_cmd(cfg: LaunchConfig, stream: str, topic: str) -> list[str]:
+    cmd = [
+        cfg.agent_command,
+        "run",
+        "--format", "json",
+        "--dir", str(cfg.working_dir.resolve()),
+        "--dangerously-skip-permissions",
+    ]
+    if cfg.opencode_model:
+        cmd += ["--model", cfg.opencode_model]
+    if cfg.opencode_agent:
+        cmd += ["--agent", cfg.opencode_agent]
+    cmd += cfg.backend_flags
+    cmd.append(bootstrap_prompt(stream, topic))
+    return cmd
+
+
+def _opencode_config_json(cfg: LaunchConfig, env: MutableMapping[str, str]) -> str:
+    """Build the OPENCODE_CONFIG_CONTENT JSON string."""
+    config: dict[str, Any] = {}
+    if cfg.system_prompt.exists():
+        config["instructions"] = [str(cfg.system_prompt.resolve())]
+    if cfg.mcp_config.exists():
+        config["mcp"] = _opencode_mcp_servers(cfg.mcp_config, env)
+    return json.dumps(config, separators=(",", ":"))
+
+
+def _opencode_mcp_servers(
+    path: Path, env: MutableMapping[str, str],
+) -> dict[str, Any]:
+    """Translate Claude .mcp.json servers to OpenCode format."""
+    data = json.loads(path.read_text())
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError(f"{path} must contain an object at mcpServers")
+
+    result: dict[str, Any] = {}
+    for name, raw_server in servers.items():
+        if not isinstance(raw_server, dict):
+            raise ValueError(f"MCP server {name!r} in {path} must be an object")
+        server = dict(raw_server)
+        oc: dict[str, Any] = {"timeout": OPENCODE_MCP_TIMEOUT_MS}
+
+        if "command" in server:
+            oc["type"] = "local"
+            command_parts = [_reject_argv_env_refs(str(server["command"]), path, name, "command")]
+            command_parts += [
+                _reject_argv_env_refs(str(a), path, name, "args")
+                for a in _as_list(server.get("args"))
+            ]
+            oc["command"] = command_parts
+        elif "url" in server:
+            oc["type"] = "remote"
+            oc["url"] = _reject_argv_env_refs(str(server["url"]), path, name, "url")
+            headers = _env_map(server.get("headers"))
+            if headers:
+                oc["headers"] = {k: _expand_env(v, env) for k, v in headers.items()}
+        else:
+            raise ValueError(f"MCP server {name!r} in {path} must define command or url")
+
+        env_block = _resolve_env_block(server.get("env"), env)
+        if env_block:
+            oc["environment"] = env_block
+
+        result[name] = oc
+    return result
+
+
+def _resolve_env_block(
+    raw: object, env: MutableMapping[str, str],
+) -> dict[str, str]:
+    """Resolve a Claude env map and propagate values into the process env.
+
+    Side effect: writes resolved values back into ``env`` so later servers
+    in the same config can reference them (matches Codex env propagation).
+    """
+    resolved: dict[str, str] = {}
+    for key, value in _env_map(raw).items():
+        expanded = _expand_env(str(value), env)
+        resolved[key] = expanded
+        env[key] = expanded
+    return resolved
 
 
 def _build_codex_cmd(
@@ -305,9 +396,8 @@ def _reject_argv_env_refs(value: str, path: Path, server_name: str, field: str) 
         return value
     raise ValueError(
         f"MCP server {server_name!r} in {path} uses ${{{match.group(1)}}} in {field}. "
-        "Codex .mcp.json translation cannot expand environment variables in command, "
-        "args, cwd, or url because those values are passed through process argv. "
-        "Move secrets into env, headers, env_http_headers, or bearer_token_env_var."
+        "The .mcp.json translation does not expand environment variables in command, "
+        "args, cwd, or url. Move secrets into the env block or header fields."
     )
 
 
