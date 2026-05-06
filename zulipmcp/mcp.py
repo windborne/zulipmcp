@@ -483,6 +483,24 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                 _logger.info(f"listen() got {len(visible)} messages, returning")
                 return _build_listen_response(visible, listen_msg_id)
 
+            # Check for external interrupt signal (file-based IPC).
+            _interrupt_dir = os.environ.get("WORKSPACE_PATH", "")
+            if _interrupt_dir:
+                _interrupt_path = Path(_interrupt_dir) / ".listen_interrupt"
+                try:
+                    if _interrupt_path.exists():
+                        _interrupt_content = _interrupt_path.read_text()
+                        _interrupt_path.unlink(missing_ok=True)
+                        _logger.info("listen() interrupted by .listen_interrupt file")
+                        return (
+                            "External event interrupted listen(). "
+                            "Handle the event below, then listen() again "
+                            "if you're waiting for follow-up.\n\n"
+                            + _interrupt_content
+                        )
+                except Exception:
+                    _logger.debug("listen() interrupt file check failed", exc_info=True)
+
             # MCP keepalive
             elapsed = int(time.time() - start)
             try:
