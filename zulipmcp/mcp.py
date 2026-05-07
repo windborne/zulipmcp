@@ -87,6 +87,7 @@ _hooks: dict = {
     "on_set_context": None,   # (stream, topic) -> str : extra text appended to set_context response
     "on_reply": None,         # (sent_message_id, content) -> None : called after reply()
     "dismiss_emoji": None,    # set[str] : emoji names that trigger session dismiss (default: {"stop_sign"})
+    "interrupt_file": None,   # Path | str : file path polled during listen() for external interrupts
 }
 
 
@@ -109,12 +110,19 @@ def configure(**kwargs):
         dismiss_emoji: set[str]
             Emoji names that trigger session dismiss via reaction.
             Default: {"stop_sign"}. Pass a set to override/extend.
+        interrupt_file: str | Path
+            File path polled during listen() between long-poll iterations.
+            If the file exists, its content is read, the file is deleted,
+            and listen() returns the content. Enables external processes
+            to interrupt a blocking listen() call via the filesystem.
     """
     for key, value in kwargs.items():
         if key not in _hooks:
             raise ValueError(f"Unknown hook: {key!r}. Valid hooks: {list(_hooks.keys())}")
         if key == "dismiss_emoji":
             zulip_core.set_dismiss_emoji(value)
+        if key == "interrupt_file":
+            value = Path(value) if value else None
         _hooks[key] = value
 
 
@@ -448,9 +456,8 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
 
         # Shorten poll cycles when interrupt file monitoring is active
         # so external events are detected within ~60s instead of ~90s.
-        _interrupt_dir = os.environ.get("WORKSPACE_PATH", "")
-        _interrupt_path = Path(_interrupt_dir) / ".listen_interrupt" if _interrupt_dir else None
-        _max_poll = 60 if _interrupt_dir else longpoll_timeout
+        _interrupt_path = _hooks.get("interrupt_file")
+        _max_poll = 60 if _interrupt_path else longpoll_timeout
 
         while time.time() < deadline:
             # Long-poll in a thread so we can interleave MCP keepalives.
@@ -494,13 +501,8 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                 try:
                     _interrupt_content = _interrupt_path.read_text()
                     _interrupt_path.unlink(missing_ok=True)
-                    _logger.info("listen() interrupted by .listen_interrupt file")
-                    return (
-                        "External event interrupted listen(). "
-                        "Handle the event below, then listen() again "
-                        "if you're waiting for follow-up.\n\n"
-                        + _interrupt_content
-                    )
+                    _logger.info("listen() interrupted by %s", _interrupt_path)
+                    return _interrupt_content
                 except FileNotFoundError:
                     pass
                 except Exception:
