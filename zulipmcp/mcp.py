@@ -87,6 +87,7 @@ _hooks: dict = {
     "on_set_context": None,   # (stream, topic) -> str : extra text appended to set_context response
     "on_reply": None,         # (sent_message_id, content) -> None : called after reply()
     "dismiss_emoji": None,    # set[str] : emoji names that trigger session dismiss (default: {"stop_sign"})
+    "interrupt_file": None,   # Path | str : file path polled during listen() for external interrupts
 }
 
 
@@ -109,12 +110,19 @@ def configure(**kwargs):
         dismiss_emoji: set[str]
             Emoji names that trigger session dismiss via reaction.
             Default: {"stop_sign"}. Pass a set to override/extend.
+        interrupt_file: str | Path
+            File path polled during listen() between long-poll iterations.
+            If the file exists, its content is read, the file is deleted,
+            and listen() returns the content. Enables external processes
+            to interrupt a blocking listen() call via the filesystem.
     """
     for key, value in kwargs.items():
         if key not in _hooks:
             raise ValueError(f"Unknown hook: {key!r}. Valid hooks: {list(_hooks.keys())}")
         if key == "dismiss_emoji":
             zulip_core.set_dismiss_emoji(value)
+        if key == "interrupt_file":
+            value = Path(value) if value else None
         _hooks[key] = value
 
 
@@ -446,10 +454,15 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
         deadline = start + timeout_seconds
         loop = asyncio.get_event_loop()
 
+        # Shorten poll cycles when interrupt file monitoring is active
+        # so external events are detected within ~60s instead of ~90s.
+        _interrupt_path = _hooks.get("interrupt_file")
+        _max_poll = 60 if _interrupt_path else longpoll_timeout
+
         while time.time() < deadline:
             # Long-poll in a thread so we can interleave MCP keepalives.
             remaining = deadline - time.time()
-            poll_timeout = min(longpoll_timeout, max(int(remaining), 1))
+            poll_timeout = min(_max_poll, max(int(remaining), 1))
 
             try:
                 messages, reactions, last_event_id = await loop.run_in_executor(
@@ -482,6 +495,18 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             if visible:
                 _logger.info(f"listen() got {len(visible)} messages, returning")
                 return _build_listen_response(visible, listen_msg_id)
+
+            # Check for external interrupt signal (file-based IPC).
+            if _interrupt_path:
+                try:
+                    _interrupt_content = _interrupt_path.read_text()
+                    _interrupt_path.unlink(missing_ok=True)
+                    _logger.info("listen() interrupted by %s", _interrupt_path)
+                    return _interrupt_content
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    _logger.debug("listen() interrupt file check failed", exc_info=True)
 
             # MCP keepalive
             elapsed = int(time.time() - start)
