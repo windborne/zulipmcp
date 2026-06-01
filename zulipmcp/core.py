@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 
 import diskcache
+import requests
 import zulip
 
 TIMEZONE = ZoneInfo("America/Los_Angeles")
@@ -1335,15 +1336,18 @@ def get_events(queue_id: str, last_event_id: int,
     (heartbeat only). Raises ValueError on BAD_EVENT_QUEUE_ID (caller
     should re-register).
     """
-    result = get_client().call_endpoint(
-        url="/events",
-        method="GET",
-        request={
-            "queue_id": queue_id,
-            "last_event_id": last_event_id,
-        },
-        timeout=longpoll_timeout + 30,  # HTTP timeout > server timeout
-    )
+    try:
+        result = get_client().call_endpoint(
+            url="/events",
+            method="GET",
+            request={
+                "queue_id": queue_id,
+                "last_event_id": last_event_id,
+            },
+            timeout=longpoll_timeout + 30,  # HTTP timeout > server timeout
+        )
+    except requests.exceptions.ReadTimeout:
+        return [], [], last_event_id
     if result.get("result") != "success":
         code = result.get("code", "")
         if code == "BAD_EVENT_QUEUE_ID":
