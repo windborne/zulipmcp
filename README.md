@@ -155,6 +155,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | Variable | Description |
 |---|---|
 | `ZULIP_RC_PATH` | Absolute path to `.zuliprc` for direct MCP server use. Listener mode sets this for spawned sessions from `--zuliprc`; it does not read ambient `ZULIP_RC_PATH` as its own default. |
+| `ZULIP_MAX_MESSAGE_LENGTH` | Char limit above which send tools return an error instead of letting Zulip silently truncate. Defaults to `10000` (Zulip's default); set for realms with a custom cap. |
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
 | `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only -- the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |

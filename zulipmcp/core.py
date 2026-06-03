@@ -20,6 +20,15 @@ _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
 _dismiss_emoji: set[str] = {"stop_sign", "real-gun"}
 
+# Zulip silently truncates messages longer than this server-side, so a sender
+# never learns its message was clipped. Matches Zulip's default; override via
+# env for realms configured with a different cap. Bad values fall back rather
+# than crashing the server at import.
+try:
+    MAX_MESSAGE_LENGTH = int(os.environ.get("ZULIP_MAX_MESSAGE_LENGTH", "10000"))
+except ValueError:
+    MAX_MESSAGE_LENGTH = 10000
+
 
 def _is_allow_all_token(value: object) -> bool:
     """Whether a value is the special allow-all sentinel."""

@@ -22,6 +22,7 @@ Separation is load-bearing: `core.py` must stay MCP-agnostic so it works as a st
 - **Event queue narrow does NOT filter reactions.** `is_dismiss_reaction()` receives reactions from all streams — it fetches the reacted-on message to verify stream/topic. Don't remove that check.
 - **`_session` is module-level singleton.** One session per process. Don't add multi-session — MCP is one-client-per-server.
 - **`reply()` checks for missed messages before sending.** The `last_seen_message_id` bookkeeping is subtle — trace it carefully before changing.
+- **Send tools enforce `MAX_MESSAGE_LENGTH`.** Zulip silently truncates over-limit messages and still reports success — the guard returns an error to the caller instead. Override with `ZULIP_MAX_MESSAGE_LENGTH` for non-default realm caps.
 - **Two dismiss-check paths exist intentionally.** `listen()` catches via events, `reply()` via REST poll. Both needed — user might react during tool execution (not listening).
 - **Private stream security is asymmetric on purpose.** Unset `BOT_ALLOWED_PRIVATE_STREAMS` = no access (default-deny). Unset `BOT_ALLOWED_WRITE_STREAMS` = all writes allowed (backwards-compat). Don't "fix" the asymmetry.
 - **`configure()` must be called before `run_server()`.** `run_server()` may auto-init a session that reads hook state.
