@@ -1112,7 +1112,7 @@ def get_message_link(message_id: int) -> str:
 
     The URL links to the full conversation context with the specific message
     focused, using the format:
-        {base}/#narrow/channel/{stream_id}-{stream_name}/topic/{topic}/with/{message_id}
+        {base}/#narrow/channel/{stream_id}-{stream_name}/topic/{topic}/near/{message_id}
 
     Falls back to a simpler URL format if stream_id lookup fails.
     """
@@ -1144,7 +1144,7 @@ def get_message_link(message_id: int) -> str:
     if stream_id:
         # Zulip URL-encodes topics with . notation (space -> .20, etc)
         topic_encoded = urllib.parse.quote(topic, safe="").replace("%", ".")
-        url = f"{base}/#narrow/channel/{stream_id}-{stream}/topic/{topic_encoded}/with/{message_id}"
+        url = f"{base}/#narrow/channel/{stream_id}-{stream}/topic/{topic_encoded}/near/{message_id}"
     else:
         # Fallback if we can't get stream_id
         url = f"{base}/#narrow/id/{message_id}"
