@@ -137,6 +137,20 @@ def _get_prefix() -> str:
     return ""
 
 
+def _length_error(content: str, prefix: str = "") -> Optional[str]:
+    """Return a steering error if prefix+content exceeds Zulip's limit, else None.
+
+    Zulip truncates over-limit messages server-side and still reports success,
+    so the caller never learns its message was clipped. Counting the prefix
+    (which the server prepends to the body) keeps the budget exact.
+    """
+    over = len(prefix) + len(content) - zulip_core.MAX_MESSAGE_LENGTH
+    if over <= 0:
+        return None
+    return (f"Error: {over} chars over Zulip's {zulip_core.MAX_MESSAGE_LENGTH}-char "
+            f"limit. Split into multiple messages, use a spoiler block, or upload_file().")
+
+
 @dataclass
 class SessionState:
     """Tracks the current conversation session."""
@@ -329,6 +343,12 @@ def reply(content: str) -> str:
             _logger.debug(f"reply() found {len(missed)} missed messages")
 
     prefix = _get_prefix()
+    # Guard sits after the missed-message fetch above, but before any
+    # last_seen bookkeeping (which only runs post-send) — an early return
+    # here leaves session state untouched, so missed messages resurface next call.
+    too_long = _length_error(content, prefix)
+    if too_long:
+        return too_long
     result = zulip_core.send_message(_session.stream, _session.topic, prefix + content)
     if result["result"] != "success":
         _logger.error(f"reply() send_message failed: {result}")
@@ -608,7 +628,14 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
         duration_str = f"{duration_secs}s" if duration_secs < 60 else f"{duration_secs // 60}m"
 
         prefix = _get_prefix()
-        result = zulip_core.send_message(stream, topic, prefix + message + f" | {duration_str}")
+        suffix = f" | {duration_str}"
+        # Teardown can't surface an error to the model, so trim an oversized
+        # farewell to fit rather than letting Zulip silently clip it.
+        budget = zulip_core.MAX_MESSAGE_LENGTH - len(prefix) - len(suffix)
+        if len(message) > budget:
+            _logger.warning(f"end_session() trimmed oversized farewell to fit {zulip_core.MAX_MESSAGE_LENGTH}-char limit")
+            message = message[:max(budget, 0)]
+        result = zulip_core.send_message(stream, topic, prefix + message + suffix)
         if result["result"] != "success":
             _logger.error(f"end_session() farewell send_message failed: {result}")
         else:
@@ -874,6 +901,9 @@ def send_message(stream: str, topic: str, content: str) -> str:
     if err:
         return err
     prefix = _get_prefix()
+    too_long = _length_error(content, prefix)
+    if too_long:
+        return too_long
     result = zulip_core.send_message(stream, topic, prefix + content)
     if result["result"] != "success":
         return f"Error sending message: {result.get('msg', 'Unknown error')}"
@@ -891,6 +921,9 @@ def send_direct_message(recipients: list[str], content: str) -> str:
     if not recipients:
         return "Error: No recipients specified."
     prefix = _get_prefix()
+    too_long = _length_error(content, prefix)
+    if too_long:
+        return too_long
     result = zulip_core.send_direct_message(recipients, prefix + content)
     if result["result"] != "success":
         return f"Error sending DM: {result.get('msg', 'Unknown error')}"
@@ -940,6 +973,9 @@ def edit_message(message_id: int, content: str) -> str:
     Returns:
         Confirmation or error message.
     """
+    too_long = _length_error(content)
+    if too_long:
+        return too_long
     result = zulip_core.edit_message(message_id, content)
     if result.get("result") != "success":
         return f"Error editing message: {result.get('msg', 'Unknown error')}"
