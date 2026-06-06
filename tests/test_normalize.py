@@ -142,16 +142,16 @@ def test_separator_with_minimal_dashes():
 def test_real_world_llm_output():
     text = (
         "Here are the results:\n"
-        "| Mission | Status | Alt (km) |\n"
+        "| Name | Status | Score |\n"
         "| --- | --- | --- |\n"
-        "| W-3352 | Flying | 21.5 |\n"
-        "| W-3400 | Descending | 18.2 |"
+        "| Alice | Active | 95.2 |\n"
+        "| Bob | Pending | 87.0 |"
     )
     expected = (
         "Here are the results:\n\n"
-        "| Mission | Status | Alt (km) |\n"
+        "| Name | Status | Score |\n"
         "| --- | --- | --- |\n"
-        "| W-3352 | Flying | 21.5 |\n"
-        "| W-3400 | Descending | 18.2 |"
+        "| Alice | Active | 95.2 |\n"
+        "| Bob | Pending | 87.0 |"
     )
     assert normalize_zulip_markdown(text) == expected
