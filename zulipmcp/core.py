@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import tempfile
 import json
@@ -28,6 +29,68 @@ try:
     MAX_MESSAGE_LENGTH = int(os.environ.get("ZULIP_MAX_MESSAGE_LENGTH", "10000"))
 except ValueError:
     MAX_MESSAGE_LENGTH = 10000
+
+_FENCE_RE = re.compile(r'^(`{3,}|~{3,})')
+
+
+def _is_table_separator(line: str) -> bool:
+    """Whether *line* is a markdown table separator (e.g. ``| --- | --- |``)."""
+    stripped = line.strip()
+    if not stripped or '-' not in stripped:
+        return False
+    inner = stripped.lstrip('|').rstrip('|')
+    return bool(inner) and set(inner) <= set('|:- ')
+
+
+def normalize_zulip_markdown(content: str) -> str:
+    """Ensure blank lines before markdown tables.
+
+    Zulip's Python-Markdown parser requires a blank line before table header
+    rows, but LLMs trained on GFM frequently omit them.  Injects the missing
+    blank line while skipping fenced code blocks, indented code, and
+    blockquotes.
+    """
+    lines = content.split('\n')
+    result: list[str] = []
+    in_fence = False
+    fence_char: str | None = None
+    fence_len = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        m = _FENCE_RE.match(stripped)
+        if m:
+            fence_chars = m.group(1)
+            after_fence = stripped[len(fence_chars):]
+            if not in_fence:
+                in_fence, fence_char, fence_len = True, fence_chars[0], len(fence_chars)
+            elif fence_chars[0] == fence_char and len(fence_chars) >= fence_len and not after_fence:
+                in_fence = False
+                fence_char = None
+            result.append(line)
+            continue
+
+        if in_fence:
+            result.append(line)
+            continue
+
+        if (
+            stripped
+            and '|' in stripped
+            and result
+            and result[-1].strip()
+            and not stripped.startswith('>')
+            and not line.startswith('    ')
+            and not line.startswith('\t')
+            and i + 1 < len(lines)
+            and _is_table_separator(lines[i + 1])
+        ):
+            result.append('')
+
+        result.append(line)
+
+    return '\n'.join(result)
 
 
 def _is_allow_all_token(value: object) -> bool:
@@ -802,7 +865,7 @@ def send_message(stream: str, topic: str, content: str) -> dict:
         "type": "stream",
         "to": stream,
         "subject": topic,
-        "content": content,
+        "content": normalize_zulip_markdown(content),
     })
 
 
@@ -819,7 +882,7 @@ def send_direct_message(recipients: list[str], content: str) -> dict:
     return get_client().send_message({
         "type": "direct",
         "to": recipients,
-        "content": content,
+        "content": normalize_zulip_markdown(content),
     })
 
 
@@ -847,7 +910,7 @@ def edit_message(message_id: int, content: str) -> dict:
         return err
     return get_client().update_message({
         "message_id": message_id,
-        "content": content,
+        "content": normalize_zulip_markdown(content),
     })
 
 
