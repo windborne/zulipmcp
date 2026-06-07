@@ -35,3 +35,8 @@ Issues = "https://github.com/windborne/zulipmcp/issues"
 
 [tool.setuptools.packages.find]
 include = ["zulipmcp*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
