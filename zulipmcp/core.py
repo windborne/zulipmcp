@@ -894,13 +894,19 @@ def add_reaction(message_id: int, emoji_name: str) -> dict:
     })
 
 
-def remove_reaction(message_id: int, emoji_name: str) -> dict:
-    """Remove emoji reaction from a message. Returns API result dict."""
-    return get_client().remove_reaction({
+def remove_reaction(message_id: int, emoji_name: str,
+                     reaction_type: Optional[str] = None) -> dict:
+    """Remove emoji reaction from a message. Returns API result dict.
+
+    If *reaction_type* is omitted the server auto-detects the type.
+    """
+    params: dict = {
         "message_id": message_id,
         "emoji_name": emoji_name,
-        "reaction_type": "realm_emoji",
-    })
+    }
+    if reaction_type:
+        params["reaction_type"] = reaction_type
+    return get_client().remove_reaction(params)
 
 
 def edit_message(message_id: int, content: str) -> dict:
@@ -1020,6 +1026,20 @@ def get_emoji_count() -> int:
         )
     except Exception:
         return 0
+
+
+def has_custom_emoji(name: str) -> bool:
+    """Return True if the realm has an active custom emoji with *name*."""
+    try:
+        result = get_client().get_realm_emoji()
+        if result.get("result") != "success":
+            return False
+        return any(
+            info["name"] == name and not info.get("deactivated", False)
+            for info in result.get("emoji", {}).values()
+        )
+    except Exception:
+        return False
 
 
 def summarize_reactions(reactions: list) -> str:
