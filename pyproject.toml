@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "zulipmcp"
 version = "0.1.0"
 description = "Run AI agents in Zulip as @mentionable bots — or wire into any MCP client"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "WindBorne Systems"}]
 requires-python = ">=3.10"
 readme = "README.md"
@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
+    "License :: OSI Approved :: Apache Software License",
     "Typing :: Typed",
 ]
 dependencies = [
