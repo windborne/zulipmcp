@@ -19,7 +19,7 @@ _cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
     Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
-_dismiss_emoji: set[str] = {"stop_sign", "real-gun"}
+_dismiss_emoji: set[str] = {"stop_sign"}
 
 # Zulip silently truncates messages longer than this server-side, so a sender
 # never learns its message was clipped. Matches Zulip's default; override via
