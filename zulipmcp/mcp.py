@@ -81,7 +81,7 @@ def _reject_if_cannot_write(stream: str) -> str | None:
 # Listen-indicator emoji — prefer custom :robot_ear:, fall back to built-in
 # ============================================================================
 
-_FALLBACK_LISTEN_EMOJI = "ear_with_hearing_aid"
+_FALLBACK_LISTEN_EMOJI = "ear"
 _listen_emoji: Optional[str] = None
 
 
@@ -90,7 +90,7 @@ def _resolve_listen_emoji(emoji_names: Optional[set[str]] = None) -> str:
 
     Resolved once and cached for the process lifetime.  Prefers the custom
     ``robot_ear`` emoji when available, otherwise falls back to the built-in
-    ``ear_with_hearing_aid``.
+    ``ear``.
 
     Pass *emoji_names* from a prior ``get_emoji_info()`` call to avoid a
     redundant API round-trip.
