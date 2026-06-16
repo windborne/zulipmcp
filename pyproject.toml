@@ -20,7 +20,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
-    "License :: OSI Approved :: Apache Software License",
     "Typing :: Typed",
 ]
 dependencies = [
