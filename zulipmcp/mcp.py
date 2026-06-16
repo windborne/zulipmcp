@@ -78,6 +78,33 @@ def _reject_if_cannot_write(stream: str) -> str | None:
 
 
 # ============================================================================
+# Listen-indicator emoji — prefer custom :robot_ear:, fall back to built-in
+# ============================================================================
+
+_FALLBACK_LISTEN_EMOJI = "ear_with_hearing_aid"
+_listen_emoji: Optional[str] = None
+
+
+def _resolve_listen_emoji(emoji_names: Optional[set[str]] = None) -> str:
+    """Return the emoji name to use as a listening indicator.
+
+    Resolved once and cached for the process lifetime.  Prefers the custom
+    ``robot_ear`` emoji when available, otherwise falls back to the built-in
+    ``ear_with_hearing_aid``.
+
+    Pass *emoji_names* from a prior ``get_emoji_info()`` call to avoid a
+    redundant API round-trip.
+    """
+    global _listen_emoji
+    if _listen_emoji is None:
+        if emoji_names is None:
+            _, emoji_names = zulip_core.get_emoji_info()
+        _listen_emoji = "robot_ear" if "robot_ear" in emoji_names else _FALLBACK_LISTEN_EMOJI
+        _logger.debug(f"Listen emoji resolved to :{_listen_emoji}:")
+    return _listen_emoji
+
+
+# ============================================================================
 # Hook system — allows callers to customize MCP behavior without forking
 # ============================================================================
 
@@ -244,8 +271,9 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     if trigger_id is not None:
         output += f"\n\nTrigger message ID: {trigger_id}"
 
-    # Custom emoji count
-    emoji_count = zulip_core.get_emoji_count()
+    # Custom emoji — single API call for both count and listen-indicator resolution
+    emoji_count, emoji_names = zulip_core.get_emoji_info()
+    _resolve_listen_emoji(emoji_names)
     if emoji_count:
         output += (
             f"\n\n---\n{emoji_count} custom emoji available on this server. "
@@ -429,7 +457,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     # Add listening indicator
     if listen_msg_id:
         try:
-            zulip_core.add_reaction(listen_msg_id, "robot_ear")
+            zulip_core.add_reaction(listen_msg_id, _resolve_listen_emoji())
         except Exception:
             pass
 
@@ -549,7 +577,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             zulip_core.delete_event_queue(queue_id)
         if listen_msg_id:
             try:
-                zulip_core.remove_reaction(listen_msg_id, "robot_ear")
+                zulip_core.remove_reaction(listen_msg_id, _resolve_listen_emoji())
             except Exception:
                 pass
 

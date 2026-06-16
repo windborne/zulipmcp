@@ -136,7 +136,7 @@ The listener is deliberately minimal. It omits concurrency caps, workspace isola
 
 The `listen` tool uses Zulip's [real-time events API](https://zulip.com/api/real-time-events) (long-polling) instead of repeated `GET /messages` calls. On entry it catches up on any messages since `last_seen_message_id`, subscribes the bot to the stream if needed, registers a narrowed event queue for the stream/topic, and then long-polls via `GET /events`. The server blocks until a message arrives or ~90 seconds elapse (heartbeat), making this ~30x more efficient than polling every 2 seconds. If the queue expires (`BAD_EVENT_QUEUE_ID`), it re-registers automatically. The queue is deleted in a `finally` block on exit.
 
-A `robot_ear` emoji is added to the last message as a visual indicator while listening and removed when listening stops. MCP keepalive pings are sent via `ctx.info()` after each long-poll cycle.
+An `ear_with_hearing_aid` emoji is added to the last message as a visual indicator while listening and removed when listening stops. If the realm has a custom emoji named `robot_ear`, that is used instead. MCP keepalive pings are sent via `ctx.info()` after each long-poll cycle.
 
 ### No missed messages on reply
 

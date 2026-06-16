@@ -894,13 +894,19 @@ def add_reaction(message_id: int, emoji_name: str) -> dict:
     })
 
 
-def remove_reaction(message_id: int, emoji_name: str) -> dict:
-    """Remove emoji reaction from a message. Returns API result dict."""
-    return get_client().remove_reaction({
+def remove_reaction(message_id: int, emoji_name: str,
+                     reaction_type: Optional[str] = None) -> dict:
+    """Remove emoji reaction from a message. Returns API result dict.
+
+    If *reaction_type* is omitted the server auto-detects the type.
+    """
+    params: dict = {
         "message_id": message_id,
         "emoji_name": emoji_name,
-        "reaction_type": "realm_emoji",
-    })
+    }
+    if reaction_type is not None:
+        params["reaction_type"] = reaction_type
+    return get_client().remove_reaction(params)
 
 
 def edit_message(message_id: int, content: str) -> dict:
@@ -1008,18 +1014,30 @@ def list_emoji(query: str = "") -> tuple[list[str], int]:
     return all_emoji, total
 
 
-def get_emoji_count() -> int:
-    """Return count of active custom emoji. Returns 0 on error."""
+def get_emoji_info() -> tuple[int, set[str]]:
+    """Return (count, names) of active custom emoji.
+
+    Single API call — use this instead of separate count/has checks.
+    Returns ``(0, set())`` on error.
+    """
     try:
         result = get_client().get_realm_emoji()
         if result.get("result") != "success":
-            return 0
-        return sum(
-            1 for info in result.get("emoji", {}).values()
+            return 0, set()
+        names = {
+            info["name"]
+            for info in result.get("emoji", {}).values()
             if not info.get("deactivated", False)
-        )
+        }
+        return len(names), names
     except Exception:
-        return 0
+        return 0, set()
+
+
+def get_emoji_count() -> int:
+    """Return count of active custom emoji. Returns 0 on error."""
+    count, _ = get_emoji_info()
+    return count
 
 
 def summarize_reactions(reactions: list) -> str:
