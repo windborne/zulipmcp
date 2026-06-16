@@ -904,7 +904,7 @@ def remove_reaction(message_id: int, emoji_name: str,
         "message_id": message_id,
         "emoji_name": emoji_name,
     }
-    if reaction_type:
+    if reaction_type is not None:
         params["reaction_type"] = reaction_type
     return get_client().remove_reaction(params)
 
