@@ -1014,32 +1014,30 @@ def list_emoji(query: str = "") -> tuple[list[str], int]:
     return all_emoji, total
 
 
+def get_emoji_info() -> tuple[int, set[str]]:
+    """Return (count, names) of active custom emoji.
+
+    Single API call — use this instead of separate count/has checks.
+    Returns ``(0, set())`` on error.
+    """
+    try:
+        result = get_client().get_realm_emoji()
+        if result.get("result") != "success":
+            return 0, set()
+        names = {
+            info["name"]
+            for info in result.get("emoji", {}).values()
+            if not info.get("deactivated", False)
+        }
+        return len(names), names
+    except Exception:
+        return 0, set()
+
+
 def get_emoji_count() -> int:
     """Return count of active custom emoji. Returns 0 on error."""
-    try:
-        result = get_client().get_realm_emoji()
-        if result.get("result") != "success":
-            return 0
-        return sum(
-            1 for info in result.get("emoji", {}).values()
-            if not info.get("deactivated", False)
-        )
-    except Exception:
-        return 0
-
-
-def has_custom_emoji(name: str) -> bool:
-    """Return True if the realm has an active custom emoji with *name*."""
-    try:
-        result = get_client().get_realm_emoji()
-        if result.get("result") != "success":
-            return False
-        return any(
-            info["name"] == name and not info.get("deactivated", False)
-            for info in result.get("emoji", {}).values()
-        )
-    except Exception:
-        return False
+    count, _ = get_emoji_info()
+    return count
 
 
 def summarize_reactions(reactions: list) -> str:
