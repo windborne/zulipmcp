@@ -898,7 +898,10 @@ def remove_reaction(message_id: int, emoji_name: str,
                      reaction_type: Optional[str] = None) -> dict:
     """Remove emoji reaction from a message. Returns API result dict.
 
-    If *reaction_type* is omitted the server auto-detects the type.
+    Pass *reaction_type* (``"unicode_emoji"``, ``"realm_emoji"``, or
+    ``"zulip_extra_emoji"``) for non-unicode emoji — the server defaults
+    to ``"unicode_emoji"`` when omitted, so custom-emoji removals fail
+    without it.
     """
     params: dict = {
         "message_id": message_id,
