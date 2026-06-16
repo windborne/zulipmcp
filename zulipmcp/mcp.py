@@ -83,6 +83,7 @@ def _reject_if_cannot_write(stream: str) -> str | None:
 
 _FALLBACK_LISTEN_EMOJI = "ear"
 _listen_emoji: Optional[str] = None
+_listen_reaction_type: Optional[str] = None
 
 
 def _resolve_listen_emoji(emoji_names: Optional[set[str]] = None) -> str:
@@ -92,15 +93,26 @@ def _resolve_listen_emoji(emoji_names: Optional[set[str]] = None) -> str:
     ``robot_ear`` emoji when available, otherwise falls back to the built-in
     ``ear``.
 
+    Also caches the corresponding ``reaction_type`` in
+    ``_listen_reaction_type`` so callers can pass it to
+    ``remove_reaction()`` — the Zulip ``DELETE /reactions`` endpoint
+    defaults ``reaction_type`` to ``unicode_emoji`` and does not
+    auto-detect, so custom emoji removals fail without it.
+
     Pass *emoji_names* from a prior ``get_emoji_info()`` call to avoid a
     redundant API round-trip.
     """
-    global _listen_emoji
+    global _listen_emoji, _listen_reaction_type
     if _listen_emoji is None:
         if emoji_names is None:
             _, emoji_names = zulip_core.get_emoji_info()
-        _listen_emoji = "robot_ear" if "robot_ear" in emoji_names else _FALLBACK_LISTEN_EMOJI
-        _logger.debug(f"Listen emoji resolved to :{_listen_emoji}:")
+        if "robot_ear" in emoji_names:
+            _listen_emoji = "robot_ear"
+            _listen_reaction_type = "realm_emoji"
+        else:
+            _listen_emoji = _FALLBACK_LISTEN_EMOJI
+            _listen_reaction_type = "unicode_emoji"
+        _logger.debug(f"Listen emoji resolved to :{_listen_emoji}: ({_listen_reaction_type})")
     return _listen_emoji
 
 
@@ -577,7 +589,10 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             zulip_core.delete_event_queue(queue_id)
         if listen_msg_id:
             try:
-                zulip_core.remove_reaction(listen_msg_id, _resolve_listen_emoji())
+                zulip_core.remove_reaction(
+                    listen_msg_id, _resolve_listen_emoji(),
+                    reaction_type=_listen_reaction_type,
+                )
             except Exception:
                 pass
 
@@ -974,14 +989,19 @@ def add_reaction(message_id: int, emoji_name: str) -> str:
 
 
 @mcp.tool()
-def remove_reaction(message_id: int, emoji_name: str) -> str:
+def remove_reaction(message_id: int, emoji_name: str,
+                    reaction_type: Optional[str] = None) -> str:
     """Remove an emoji reaction from a message.
 
     Args:
         message_id: The message ID.
         emoji_name: Emoji name without colons (e.g. "thumbs_up", "check").
+        reaction_type: One of "unicode_emoji", "realm_emoji", or
+            "zulip_extra_emoji". Required for custom emoji — the server
+            defaults to "unicode_emoji" when omitted.
     """
-    result = zulip_core.remove_reaction(message_id, emoji_name)
+    result = zulip_core.remove_reaction(message_id, emoji_name,
+                                        reaction_type=reaction_type)
     if result["result"] != "success":
         return f"Error removing reaction: {result.get('msg', 'Unknown error')}"
     return f"Removed :{emoji_name}: from message {message_id}"
