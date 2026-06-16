@@ -1,6 +1,6 @@
 # zulipmcp
 
-[![License: MIT](https://img.shields.io/github/license/windborne/zulipmcp)](https://github.com/windborne/zulipmcp/blob/main/LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/windborne/zulipmcp/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue)](https://www.python.org/downloads/)
 
 Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://modelcontextprotocol.io/) client. Also works as a Python library.
@@ -167,4 +167,4 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)
