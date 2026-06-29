@@ -1226,8 +1226,10 @@ def get_message_link(message_id: int) -> str:
         pass
 
     if stream_id:
-        # Zulip URL-encodes topics with . notation (space -> .20, etc)
-        topic_encoded = urllib.parse.quote(topic, safe="").replace("%", ".")
+        # Zulip URL hash encoding: percent-encode, then replace % with .
+        # (MediaWiki-style, avoids browser zealous-decoding of %XX in hash).
+        # Periods must be explicitly encoded since quote() treats them as unreserved.
+        topic_encoded = urllib.parse.quote(topic, safe="").replace(".", "%2E").replace("%", ".")
         url = f"{base}/#narrow/channel/{stream_id}-{stream}/topic/{topic_encoded}/near/{message_id}"
     else:
         # Fallback if we can't get stream_id
