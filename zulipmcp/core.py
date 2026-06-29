@@ -3,6 +3,7 @@ import re
 import time
 import tempfile
 import json
+import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -1191,17 +1192,24 @@ def verify_message(message_id: int) -> str:
     )
 
 
+_hash_replacements = {"%": ".", "(": ".28", ")": ".29", ".": ".2E"}
+
+
+def _encode_hash_component(s: str) -> str:
+    """Encode a string for Zulip URL hash fragments (MediaWiki-style dot-encoding)."""
+    encoded = urllib.parse.quote(s, safe="")
+    return "".join(_hash_replacements.get(c, c) for c in encoded)
+
+
 def get_message_link(message_id: int) -> str:
     """Return a Zulip markdown link to a message: [#stream > topic](url).
 
     The URL links to the full conversation context with the specific message
     focused, using the format:
-        {base}/#narrow/channel/{stream_id}-{stream_name}/topic/{topic}/near/{message_id}
+        {base}/#narrow/channel/{stream_id}-{stream_slug}/topic/{topic_encoded}/near/{message_id}
 
     Falls back to a simpler URL format if stream_id lookup fails.
     """
-    import urllib.parse
-
     client = get_client()
     base = client.base_url.rstrip("/")
     if base.endswith("/api"):
@@ -1209,14 +1217,12 @@ def get_message_link(message_id: int) -> str:
 
     msg = get_message_by_id(message_id)
     if not msg:
-        # Fallback: can't fetch message, just link by ID
         url = f"{base}/#narrow/id/{message_id}"
         return f"[message]({url})"
 
     stream = msg.get("display_recipient", "")
     topic = msg.get("subject", "")
 
-    # Try to get stream_id for the full context URL
     stream_id = None
     try:
         result = client.get_stream_id(stream)
@@ -1226,11 +1232,10 @@ def get_message_link(message_id: int) -> str:
         pass
 
     if stream_id:
-        # Zulip URL-encodes topics with . notation (space -> .20, etc)
-        topic_encoded = urllib.parse.quote(topic, safe="").replace("%", ".")
-        url = f"{base}/#narrow/channel/{stream_id}-{stream}/topic/{topic_encoded}/near/{message_id}"
+        topic_encoded = _encode_hash_component(topic)
+        stream_slug = _encode_hash_component(stream.replace(" ", "-"))
+        url = f"{base}/#narrow/channel/{stream_id}-{stream_slug}/topic/{topic_encoded}/near/{message_id}"
     else:
-        # Fallback if we can't get stream_id
         url = f"{base}/#narrow/id/{message_id}"
 
     return f"[#{stream} > {topic}]({url})"
