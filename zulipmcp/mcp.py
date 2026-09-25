@@ -127,7 +127,7 @@ _hooks: dict = {
     "on_reply": None,         # (sent_message_id, content) -> None : called after reply()
     "dismiss_emoji": None,    # set[str] : emoji names that trigger session dismiss (default: {"stop_sign"})
     "interrupt_file": None,   # Path | str : file path polled during listen() for external interrupts
-    "auto_typing_start": True,  # bool : send typing "start" on set_context() and after reply()
+    "auto_typing_start": True,  # bool : typing "start" on set_context() and after reply(); False = no-op / "stop"
 }
 
 
@@ -161,11 +161,12 @@ def configure(**kwargs):
             not use the sibling name "<name>.claimed", which the consumer
             reserves while reading.
         auto_typing_start: bool
-            Default True. False suppresses the automatic typing "start" on
-            set_context() and after reply(), for callers where another
-            process drives the indicator. The "stop" on listen() and
-            end_session() and the explicit typing()/stop_typing() tools are
-            unaffected.
+            Default True. False is for callers where another process drives
+            the indicator: set_context() sends nothing, and reply() sends a
+            typing "stop" instead of a "start" so the status shown while
+            composing does not outlive the message. The "stop" on listen()
+            and end_session() and the explicit typing()/stop_typing() tools
+            are unaffected.
     """
     for key, value in kwargs.items():
         if key not in _hooks:
@@ -467,8 +468,10 @@ def reply(content: str) -> str:
             _logger.warning(f"reply() on_reply hook failed: {e}")
 
     # Re-start typing — agent is about to do more work (tool calls, thinking).
-    # A listen() right after will cancel it.
-    _auto_typing_start(_session.stream, _session.topic)
+    # A listen() right after will cancel it. With auto_typing_start=False the
+    # external owner repaints the bar on its next status, so clear it instead
+    # of leaving the pre-reply status stranded under the new message.
+    _after_reply_typing()
 
     if missed:
         _session.last_seen_message_id = max(sent_id, missed[-1]["id"])
@@ -681,6 +684,14 @@ def _auto_typing_start(stream: str, topic: str) -> None:
         zulip_core.send_typing(stream, topic, "start")
     except Exception:
         _logger.debug("auto typing start failed", exc_info=True)
+
+
+def _after_reply_typing() -> None:
+    """After a reply: typing "start" by default, "stop" when auto_typing_start=False."""
+    if _hooks["auto_typing_start"]:
+        _auto_typing_start(_session.stream, _session.topic)
+    else:
+        _stop_typing_safe()
 
 
 def _stop_typing_safe():

@@ -1,9 +1,10 @@
 """Tests for the auto_typing_start hook.
 
 Contract: with the default (True) a typing "start" is sent on set_context()
-and after reply(); with configure(auto_typing_start=False) those starts are
-suppressed, while the "stop" on listen()/end_session() is always sent and
-the explicit typing() tool is unaffected.
+and after reply(); with configure(auto_typing_start=False) set_context()
+sends nothing and reply() sends a "stop" instead, while the "stop" on
+listen()/end_session() is always sent and the explicit typing() tool is
+unaffected.
 """
 import asyncio
 import importlib
@@ -59,10 +60,25 @@ def test_disabled_suppresses_set_context_start(typing_ops):
     assert typing_ops == []
 
 
-def test_disabled_suppresses_reply_start(typing_ops):
+def test_disabled_stops_after_reply(typing_ops):
     mcp.configure(auto_typing_start=False)
     assert _fn(mcp.reply)("hi").startswith("Message sent")
-    assert typing_ops == []
+    assert typing_ops == ["stop"]
+
+
+def test_disabled_reply_stop_is_after_send(typing_ops, monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(zulip_core, "send_message", lambda s, t, c: order.append("send") or {"result": "success", "id": 42})
+    monkeypatch.setattr(zulip_core, "send_typing", lambda s, t, op="start": order.append(op) or {"result": "success"})
+    mcp.configure(auto_typing_start=False)
+    _fn(mcp.reply)("hi")
+    assert order == ["send", "stop"]
+
+
+def test_disabled_reply_stop_failure_never_raises(typing_ops, monkeypatch):
+    mcp.configure(auto_typing_start=False)
+    monkeypatch.setattr(zulip_core, "send_typing", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert _fn(mcp.reply)("hi").startswith("Message sent")
 
 
 def test_disabled_still_stops_on_end_session(typing_ops):
