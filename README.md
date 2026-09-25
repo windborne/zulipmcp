@@ -200,7 +200,7 @@ Users can dismiss a bot session by reacting with a configurable emoji (default: 
 
 ### Typing indicator
 
-The typing indicator starts on `set_context()` and after every `reply()`, and stops on `listen()` and `end_session()`, so users see the bot as "typing" while it works. If another process drives the indicator, `configure(auto_typing_start=False)` suppresses the automatic starts so they cannot overwrite it; the stops still run, since clearing the indicator on idle and exit is right whoever set it. The explicit `typing()` / `stop_typing()` tools are unaffected.
+The typing indicator starts on `set_context()` and after every `reply()`, and stops on `listen()` and `end_session()`, so users see the bot as "typing" while it works. If another process drives the indicator, `configure(auto_typing_start=False)` suppresses the automatic starts so they cannot overwrite it; the stops still run, since clearing the indicator on idle and exit is right whoever set it, and `reply()` sends a stop in place of its start so the status shown while composing does not outlive the message. The explicit `typing()` / `stop_typing()` tools are unaffected.
 
 ### Bot visibility filtering
 
