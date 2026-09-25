@@ -127,6 +127,7 @@ _hooks: dict = {
     "on_reply": None,         # (sent_message_id, content) -> None : called after reply()
     "dismiss_emoji": None,    # set[str] : emoji names that trigger session dismiss (default: {"stop_sign"})
     "interrupt_file": None,   # Path | str : file path polled during listen() for external interrupts
+    "auto_typing_start": True,  # bool : send typing "start" on set_context() and after reply()
 }
 
 
@@ -159,6 +160,12 @@ def configure(**kwargs):
             the path — do not hold the existing file open to append, and do
             not use the sibling name "<name>.claimed", which the consumer
             reserves while reading.
+        auto_typing_start: bool
+            Default True. False suppresses the automatic typing "start" on
+            set_context() and after reply(), for callers where another
+            process drives the indicator. The "stop" on listen() and
+            end_session() and the explicit typing()/stop_typing() tools are
+            unaffected.
     """
     for key, value in kwargs.items():
         if key not in _hooks:
@@ -383,10 +390,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
                 _logger.warning("set_context: on_set_context hook failed", exc_info=True)
 
         # Start typing — agent is about to do work
-        try:
-            zulip_core.send_typing(stream, topic, "start")
-        except Exception:
-            _logger.debug("set_context: send_typing failed", exc_info=True)
+        _auto_typing_start(stream, topic)
 
     return result
 
@@ -464,10 +468,7 @@ def reply(content: str) -> str:
 
     # Re-start typing — agent is about to do more work (tool calls, thinking).
     # A listen() right after will cancel it.
-    try:
-        zulip_core.send_typing(_session.stream, _session.topic, "start")
-    except Exception:
-        pass
+    _auto_typing_start(_session.stream, _session.topic)
 
     if missed:
         _session.last_seen_message_id = max(sent_id, missed[-1]["id"])
@@ -512,10 +513,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
         return "Error: No session context set. Call set_context first."
 
     # Auto-stop typing — agent is just waiting, not working.
-    try:
-        zulip_core.send_typing(_session.stream, _session.topic, "stop")
-    except Exception:
-        pass
+    _stop_typing_safe()
 
     timeout_seconds = timeout_hours * 3600
     listen_msg_id = _session.last_seen_message_id
@@ -675,8 +673,18 @@ def _fire_session_end_hook():
             _logger.warning(f"on_session_end hook failed: {e}")
 
 
+def _auto_typing_start(stream: str, topic: str) -> None:
+    """Start the typing indicator unless configure(auto_typing_start=False); never raises."""
+    if not _hooks["auto_typing_start"]:
+        return
+    try:
+        zulip_core.send_typing(stream, topic, "start")
+    except Exception:
+        _logger.debug("auto typing start failed", exc_info=True)
+
+
 def _stop_typing_safe():
-    """Stop typing indicator, ignoring errors."""
+    """Stop typing indicator, ignoring errors. Deliberately not gated by auto_typing_start — see CLAUDE.md."""
     if _session.active and _session.stream and _session.topic:
         try:
             zulip_core.send_typing(_session.stream, _session.topic, "stop")

@@ -65,6 +65,7 @@ zulipmcp.send_message("engineering", "general", "Hello from Python!")
 zulipmcp.configure(
     message_prefix=lambda: "[bot] ",
     on_session_end=lambda session: print(f"Session ended in #{session.stream}"),
+    auto_typing_start=False,  # another process drives the typing indicator
 )
 ```
 
@@ -196,6 +197,10 @@ When `reply` is called, it checks for new messages *before* sending. If anyone p
 ### Session dismissal
 
 Users can dismiss a bot session by reacting with a configurable emoji (default: `:stop_sign:`) on any bot message. The dismiss check runs both during `listen()` (via reaction events) and before `reply()` (via REST API poll), covering the race condition where a user reacts while the bot is busy working. Customize with `configure(dismiss_emoji={"stop_sign", "wave"})`.
+
+### Typing indicator
+
+The typing indicator starts on `set_context()` and after every `reply()`, and stops on `listen()` and `end_session()`, so users see the bot as "typing" while it works. If another process drives the indicator, `configure(auto_typing_start=False)` suppresses the automatic starts so they cannot overwrite it; the stops still run, since clearing the indicator on idle and exit is right whoever set it. The explicit `typing()` / `stop_typing()` tools are unaffected.
 
 ### Bot visibility filtering
 
