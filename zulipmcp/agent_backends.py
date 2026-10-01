@@ -45,11 +45,17 @@ def bootstrap_prompt(
     stream: str,
     topic: str,
     *,
+    dm: list[str] | None = None,
     listen_timeout_hours: float | None = None,
 ) -> str:
-    """Return the initial instruction given to a newly spawned agent."""
+    """Return the initial instruction given to a newly spawned agent.
+
+    When ``dm`` (the other participants' emails) is given, the session is a
+    direct-message conversation and ``stream``/``topic`` are ignored.
+    """
+    start = f"set_dm_context({dm!r})" if dm else f"set_context({stream!r}, {topic!r})"
     prompt = (
-        f"Call set_context({stream!r}, {topic!r}) to begin, "
+        f"Call {start} to begin, "
         f"then handle the request and listen for follow-ups."
     )
     if listen_timeout_hours is not None:
@@ -65,10 +71,12 @@ def _bootstrap_prompt_for_config(
     cfg: LaunchConfig,
     stream: str,
     topic: str,
+    dm: list[str] | None,
 ) -> str:
     return bootstrap_prompt(
         stream,
         topic,
+        dm=dm,
         listen_timeout_hours=getattr(cfg, "listen_timeout_hours", None),
     )
 
@@ -91,20 +99,27 @@ def build_agent_cmd(
     stream: str,
     topic: str,
     env: MutableMapping[str, str] | None = None,
+    *,
+    dm: list[str] | None = None,
 ) -> list[str]:
-    """Assemble the configured backend CLI invocation."""
+    """Assemble the configured backend CLI invocation.
+
+    Pass ``dm`` (the other participants' emails) to start a DM session;
+    ``stream``/``topic`` are then ignored.
+    """
+    prompt = _bootstrap_prompt_for_config(cfg, stream, topic, dm)
     if cfg.backend == "claude":
-        return _build_claude_cmd(cfg, stream, topic)
+        return _build_claude_cmd(cfg, prompt)
     if cfg.backend == "codex":
         if env is None:
             env = os.environ.copy()
-        return _build_codex_cmd(cfg, stream, topic, env)
+        return _build_codex_cmd(cfg, prompt, env)
     if cfg.backend == "opencode":
-        return _build_opencode_cmd(cfg, stream, topic)
+        return _build_opencode_cmd(cfg, prompt)
     raise ValueError(f"Unsupported backend: {cfg.backend!r}")
 
 
-def _build_claude_cmd(cfg: LaunchConfig, stream: str, topic: str) -> list[str]:
+def _build_claude_cmd(cfg: LaunchConfig, prompt: str) -> list[str]:
     cmd = [
         cfg.agent_command,
         "--dangerously-skip-permissions",
@@ -118,12 +133,12 @@ def _build_claude_cmd(cfg: LaunchConfig, stream: str, topic: str) -> list[str]:
             cmd.append("--strict-mcp-config")
     if cfg.system_prompt.exists():
         cmd += ["--append-system-prompt", cfg.system_prompt.read_text()]
-    cmd += ["-p", _bootstrap_prompt_for_config(cfg, stream, topic)]
+    cmd += ["-p", prompt]
     cmd += cfg.backend_flags
     return cmd
 
 
-def _build_opencode_cmd(cfg: LaunchConfig, stream: str, topic: str) -> list[str]:
+def _build_opencode_cmd(cfg: LaunchConfig, prompt: str) -> list[str]:
     cmd = [
         cfg.agent_command,
         "run",
@@ -136,7 +151,7 @@ def _build_opencode_cmd(cfg: LaunchConfig, stream: str, topic: str) -> list[str]
     if cfg.opencode_agent:
         cmd += ["--agent", cfg.opencode_agent]
     cmd += cfg.backend_flags
-    cmd.append(_bootstrap_prompt_for_config(cfg, stream, topic))
+    cmd.append(prompt)
     return cmd
 
 
@@ -209,8 +224,7 @@ def _resolve_env_block(
 
 def _build_codex_cmd(
     cfg: LaunchConfig,
-    stream: str,
-    topic: str,
+    prompt: str,
     env: MutableMapping[str, str],
 ) -> list[str]:
     codex_top_level_flags, codex_exec_flags = _split_codex_flags(cfg.backend_flags)
@@ -230,7 +244,7 @@ def _build_codex_cmd(
     if cfg.mcp_config.exists():
         cmd += _codex_mcp_config_args(cfg.mcp_config, env)
     cmd += codex_exec_flags
-    cmd.append(_bootstrap_prompt_for_config(cfg, stream, topic))
+    cmd.append(prompt)
     return cmd
 
 

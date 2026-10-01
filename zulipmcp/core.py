@@ -310,7 +310,8 @@ def get_dismiss_emoji() -> set[str]:
 
 def is_dismiss_reaction(event: dict, bot_user_id: int,
                         stream: Optional[str] = None,
-                        topic: Optional[str] = None) -> bool:
+                        topic: Optional[str] = None,
+                        dm: Optional[frozenset[str]] = None) -> bool:
     """Check if a reaction event is a dismiss signal on a bot-authored message.
 
     Returns True if:
@@ -319,6 +320,8 @@ def is_dismiss_reaction(event: dict, bot_user_id: int,
     - The reactor is not the bot itself
     - The reacted-on message was sent by the bot
     - The reacted-on message is in the given stream/topic (if specified)
+    - The reacted-on message is in the given DM conversation (if ``dm`` is
+      specified as the set of other participants' emails)
 
     The last checks require one API call to fetch the message.
 
@@ -355,6 +358,8 @@ def is_dismiss_reaction(event: dict, bot_user_id: int,
             if not isinstance(display_recipient, str) or display_recipient.lower() != stream.lower():
                 return False
         if topic and msg.get("subject", "").lower() != topic.lower():
+            return False
+        if dm is not None and dm_peers(msg, bot_user_id) != dm:
             return False
         return True
     except Exception:
@@ -905,16 +910,23 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
     return topics[:limit]
 
 
-def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
-                       before_message_id: Optional[int] = None) -> list[dict]:
-    """Get messages from a specific stream/topic. Returns raw message dicts sorted by ID."""
-    if not is_private_stream_allowed(stream):
-        return []
+def _topic_narrow(stream: str, topic: str) -> list[dict]:
+    return [
+        {"operator": "stream", "operand": stream},
+        {"operator": "topic", "operand": topic},
+    ]
+
+
+def _dm_narrow(emails: list[str]) -> list[dict]:
+    # "dm" matches the conversation with exactly these users (plus the bot).
+    return [{"operator": "dm", "operand": emails}]
+
+
+def _recent_messages(narrow: list[dict], num_messages: int,
+                     before_message_id: Optional[int]) -> list[dict]:
+    """Fetch the newest messages in a narrow (or those before an ID). Sorted by ID."""
     result = get_client().get_messages({
-        "narrow": [
-            {"operator": "stream", "operand": stream},
-            {"operator": "topic", "operand": topic},
-        ],
+        "narrow": narrow,
         "anchor": before_message_id or "newest",
         "num_before": min(num_messages, 100),
         "num_after": 0,
@@ -927,16 +939,11 @@ def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
     return msgs
 
 
-def fetch_new_messages(stream: str, topic: str, after_id: int,
-                       exclude_user_id: Optional[int] = None) -> list[dict]:
-    """Fetch messages after a given ID, optionally excluding a user. Sorted by ID."""
-    if not is_private_stream_allowed(stream):
-        return []
+def _messages_after(narrow: list[dict], after_id: int,
+                    exclude_user_id: Optional[int]) -> list[dict]:
+    """Fetch messages in a narrow after an ID, optionally excluding a user. Sorted by ID."""
     result = get_client().get_messages({
-        "narrow": [
-            {"operator": "stream", "operand": stream},
-            {"operator": "topic", "operand": topic},
-        ],
+        "narrow": narrow,
         "anchor": after_id,
         "num_before": 0,
         "num_after": 100,
@@ -950,6 +957,45 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
         msgs = [m for m in msgs if m.get("sender_id") != exclude_user_id]
     msgs.sort(key=lambda m: m["id"])
     return msgs
+
+
+def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
+                       before_message_id: Optional[int] = None) -> list[dict]:
+    """Get messages from a specific stream/topic. Returns raw message dicts sorted by ID."""
+    if not is_private_stream_allowed(stream):
+        return []
+    return _recent_messages(_topic_narrow(stream, topic), num_messages, before_message_id)
+
+
+def fetch_new_messages(stream: str, topic: str, after_id: int,
+                       exclude_user_id: Optional[int] = None) -> list[dict]:
+    """Fetch messages after a given ID, optionally excluding a user. Sorted by ID."""
+    if not is_private_stream_allowed(stream):
+        return []
+    return _messages_after(_topic_narrow(stream, topic), after_id, exclude_user_id)
+
+
+def get_dm_messages(emails: list[str], num_messages: int = 20,
+                    before_message_id: Optional[int] = None) -> list[dict]:
+    """Get messages from the DM conversation with these users. Sorted by ID."""
+    return _recent_messages(_dm_narrow(emails), num_messages, before_message_id)
+
+
+def fetch_new_dm_messages(emails: list[str], after_id: int,
+                          exclude_user_id: Optional[int] = None) -> list[dict]:
+    """Fetch DM messages after a given ID, optionally excluding a user. Sorted by ID."""
+    return _messages_after(_dm_narrow(emails), after_id, exclude_user_id)
+
+
+def dm_peers(msg: dict, bot_user_id: Optional[int]) -> Optional[frozenset[str]]:
+    """Return the lowercased emails of a DM's participants other than the bot.
+
+    Returns None for stream messages (``display_recipient`` is a string there).
+    """
+    recipients = msg.get("display_recipient")
+    if not isinstance(recipients, list):
+        return None
+    return frozenset(r["email"].lower() for r in recipients if r.get("id") != bot_user_id)
 
 
 def send_message(stream: str, topic: str, content: str) -> dict:
@@ -1089,6 +1135,35 @@ def send_typing(stream: str, topic: str, op: str = "start") -> dict:
             "stream_id": stream_id,
             "topic": topic,
         },
+    )
+
+
+_user_id_cache: dict[str, int] = {}
+
+
+def send_dm_typing(emails: list[str], op: str = "start") -> dict:
+    """Send a typing indicator start/stop to a DM conversation.
+
+    Args:
+        emails: Email addresses of the other participants.
+        op: "start" or "stop".
+
+    Returns API result dict.
+    """
+    client = get_client()
+    user_ids = []
+    for email in emails:
+        key = email.lower()
+        if key not in _user_id_cache:
+            result = client.call_endpoint(url=f"/users/{email}", method="GET")
+            if result.get("result") != "success":
+                return result
+            _user_id_cache[key] = result["user"]["user_id"]
+        user_ids.append(_user_id_cache[key])
+    return client.call_endpoint(
+        url="/typing",
+        method="POST",
+        request={"op": op, "type": "direct", "to": json.dumps(user_ids)},
     )
 
 
@@ -1503,15 +1578,28 @@ def register_event_queue(stream: str, topic: str) -> tuple[str, int, int]:
     Returns (queue_id, last_event_id, longpoll_timeout_seconds).
     Raises ValueError on failure.
     """
+    return _register_queue([["channel", stream], ["topic", topic]])
+
+
+def register_dm_event_queue() -> tuple[str, int, int]:
+    """Register an event queue for all of the bot's DMs.
+
+    Event-queue narrows don't support the ``dm`` operator, so this receives
+    every DM conversation — callers filter by participants (see ``dm_peers``).
+
+    Returns (queue_id, last_event_id, longpoll_timeout_seconds).
+    Raises ValueError on failure.
+    """
+    return _register_queue([["is", "dm"]])
+
+
+def _register_queue(narrow: list[list[str]]) -> tuple[str, int, int]:
     result = get_client().call_endpoint(
         url="/register",
         method="POST",
         request={
             "event_types": json.dumps(["message", "reaction"]),
-            "narrow": json.dumps([
-                ["channel", stream],
-                ["topic", topic],
-            ]),
+            "narrow": json.dumps(narrow),
             "apply_markdown": False,
         },
     )
