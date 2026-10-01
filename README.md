@@ -168,6 +168,7 @@ uv run python -m zulipmcp.listener --backend opencode -- --verbose
 | `--codex-permission-mode` | `parity` | Codex-only permission preset. `parity` uses `--yolo` for full bypass like the Claude default and assumes external sandboxing; `workspace-write` and `read-only` use noninteractive sandboxed modes; `none` adds no permission flags. |
 | `--opencode-model` | *(none)* | OpenCode model in `provider/model` format (e.g. `anthropic/claude-sonnet-4-5`, `ollama/qwen3:235b`). When omitted, OpenCode uses its own default. |
 | `--opencode-agent` | *(none)* | OpenCode agent name (passed as `--agent`). When omitted, OpenCode uses its default agent. |
+| `--dms` | off | Also spawn one session per DM conversation when a human sends the bot a direct message (1:1 or group). DMs from other bots are ignored to avoid reply loops. |
 | `-- ...` | *(none)* | Everything after `--` is forwarded to the selected backend as-is. For Codex, known top-level-only flags are placed before `exec` automatically. |
 
 Each session gets `TRIGGER_MESSAGE_ID` and `SESSION_USER_EMAIL` set automatically so `set_context()` anchors to the @mention and hooks can identify the requester.
@@ -189,6 +190,10 @@ The listener is deliberately minimal. It omits concurrency caps, workspace isola
 The `listen` tool uses Zulip's [real-time events API](https://zulip.com/api/real-time-events) (long-polling) instead of repeated `GET /messages` calls. On entry it catches up on any messages since `last_seen_message_id`, subscribes the bot to the stream if needed, registers a narrowed event queue for the stream/topic, and then long-polls via `GET /events`. The server blocks until a message arrives or ~90 seconds elapse (heartbeat), making this ~30x more efficient than polling every 2 seconds. If the queue expires (`BAD_EVENT_QUEUE_ID`), it re-registers automatically. The queue is deleted in a `finally` block on exit.
 
 An `ear` emoji is added to the last message as a visual indicator while listening and removed when listening stops. If the realm has a custom emoji named `robot_ear`, that is used instead. MCP keepalive pings are sent via `ctx.info()` after each long-poll cycle.
+
+### Direct messages
+
+`set_dm_context(recipients)` starts a session in a DM conversation instead of a stream/topic; `recipients` are the other participants' emails. After that, `reply()`, `listen()`, `typing()`, `stop_typing()` and `end_session()` act on the DM. Zulip's event-queue narrows can't filter by DM participants, so in a DM session `listen()` registers an `is:dm` queue and keeps only messages (and dismiss reactions) from this conversation. Private-stream and write allowlists apply to streams only.
 
 ### No missed messages on reply
 

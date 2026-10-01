@@ -1,5 +1,8 @@
 """Listen for Zulip @mentions and spawn one agent session per (stream, topic).
 
+With ``--dms``, direct messages to the bot also spawn one session per DM
+conversation (DMs from other bots are ignored to avoid reply loops).
+
 Defaults:
 - `./.zuliprc` from the current working directory
 - `./.mcp.json` from the current working directory (if present)
@@ -47,6 +50,7 @@ class Config:
     codex_permission_mode: str = "parity"
     opencode_model: str = ""
     opencode_agent: str = ""
+    dms: bool = False
     backend_flags: list[str] = field(default_factory=list)
 
     def __post_init__(self):
@@ -61,8 +65,8 @@ class Config:
         self.log_dir = Path(self.log_dir)
 
 
-# One session per (stream, topic). Value is the Popen object.
-_sessions: dict[tuple[str, str], subprocess.Popen] = {}
+# One session per ("stream", stream, topic) or ("dm", peer emails). Value is the Popen object.
+_sessions: dict[tuple[str, ...], subprocess.Popen] = {}
 _lock = threading.Lock()
 
 
@@ -72,10 +76,20 @@ def _slug(text: str) -> str:
     return slug[:100]
 
 
-def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
-    """Launch an agent session for this message, if not already running."""
-    stream, topic = msg["display_recipient"], msg["subject"]
-    key = (stream.lower(), topic.lower())
+def _spawn(cfg: Config, msg: dict[str, Any], dm: list[str] | None = None) -> None:
+    """Launch an agent session for this message, if not already running.
+
+    ``dm`` is the other participants' emails for a DM message; stream
+    messages use their stream/topic.
+    """
+    if dm:
+        stream = topic = ""
+        key: tuple[str, ...] = ("dm", ",".join(dm))
+        where = "DM with " + ", ".join(dm)
+    else:
+        stream, topic = msg["display_recipient"], msg["subject"]
+        key = ("stream", stream.lower(), topic.lower())
+        where = f"#{stream} > {topic}"
 
     with _lock:
         p = _sessions.get(key)
@@ -84,11 +98,11 @@ def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
 
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
-    log_path = cfg.log_dir / f"{ts}_{_slug(key[0])}_{_slug(key[1])}.jsonl"
+    log_path = cfg.log_dir / f"{ts}_{'_'.join(_slug(k) for k in key)}.jsonl"
     fh = open(log_path, "w")
     try:
         env = build_agent_env(cfg, msg)
-        cmd = build_agent_cmd(cfg, stream, topic, env)
+        cmd = build_agent_cmd(cfg, stream, topic, env, dm=dm)
         proc = subprocess.Popen(
             cmd,
             cwd=cfg.working_dir, env=env,
@@ -103,7 +117,7 @@ def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
         )
         fh.close()
         print(
-            f"[listener] Failed to spawn {cfg.backend} session for #{stream} > {topic}: "
+            f"[listener] Failed to spawn {cfg.backend} session for {where}: "
             f"{exc} (see {log_path})",
             file=sys.stderr,
         )
@@ -117,9 +131,9 @@ def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
         with _lock:
             _sessions.pop(key, None)
 
-    threading.Thread(target=reap, daemon=True, name=f"reap:{key[0]}/{key[1]}").start()
+    threading.Thread(target=reap, daemon=True, name=f"reap:{'/'.join(key)}").start()
     print(
-        f"[listener] Spawned {cfg.backend} session for #{stream} > {topic} (pid={proc.pid})",
+        f"[listener] Spawned {cfg.backend} session for {where} (pid={proc.pid})",
         file=sys.stderr,
     )
 
@@ -180,8 +194,34 @@ def run(cfg: Config):
         result = client.add_subscriptions(streams=[{"name": stream_name}])
         return result.get("result") == "success"
 
+    bot_senders: dict[int, bool] = {}
+
+    def _is_bot(user_id: int) -> bool:
+        """Whether a user is a bot. Unknown users count as bots (safer)."""
+        if user_id not in bot_senders:
+            result = client.get_user_by_id(user_id)
+            if result.get("result") != "success":
+                return True
+            bot_senders[user_id] = result["user"].get("is_bot", False)
+        return bot_senders[user_id]
+
+    def handle_dm(msg: dict[str, Any]) -> None:
+        if msg.get("sender_id") == me or _is_bot(msg["sender_id"]):
+            return
+        peers = sorted(zulip_core.dm_peers(msg, me) or ())
+        if not peers:
+            return
+        try:
+            client.add_reaction({"message_id": msg["id"], "emoji_name": "eyes"})
+        except Exception:
+            pass
+        _spawn(cfg, msg, dm=peers)
+
     def handle(event):
         msg = event["message"]
+        if cfg.dms and msg.get("type") == "private":
+            handle_dm(msg)
+            return
         if (msg.get("type") == "stream"
                 and "mentioned" in event.get("flags", [])
                 and msg.get("sender_id") != me):
@@ -259,6 +299,10 @@ def main():
     p.add_argument(
         "--opencode-agent", default="",
         help="OpenCode agent name (passed as --agent)",
+    )
+    p.add_argument(
+        "--dms", action="store_true",
+        help="Also spawn a session for direct messages to the bot (off by default)",
     )
     p.add_argument(
         "backend_flags", nargs=argparse.REMAINDER,

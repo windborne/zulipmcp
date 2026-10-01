@@ -254,9 +254,14 @@ def _length_error(content: str, prefix: str = "") -> Optional[str]:
 
 @dataclass
 class SessionState:
-    """Tracks the current conversation session."""
+    """Tracks the current conversation session.
+
+    A session is either a stream/topic or a DM conversation (``dm`` holds
+    the sorted, lowercased emails of the other participants).
+    """
     stream: Optional[str] = None
     topic: Optional[str] = None
+    dm: Optional[list[str]] = None
     last_seen_message_id: Optional[int] = None
     last_sent_message_id: Optional[int] = None
     my_user_id: Optional[int] = None
@@ -267,14 +272,63 @@ class SessionState:
     def reset(self):
         self.stream = None
         self.topic = None
+        self.dm = None
         self.last_seen_message_id = None
         self.last_sent_message_id = None
         self.user_email = None
         self.active = False
         self.started_at = None
 
+    def has_target(self) -> bool:
+        """Whether the session has somewhere to chat (active stream/topic or DM)."""
+        return self.active and (bool(self.dm) or bool(self.stream and self.topic))
+
+    def where(self) -> str:
+        """Human-readable conversation label."""
+        if self.dm:
+            return "DM with " + ", ".join(self.dm)
+        return f"#{self.stream} > {self.topic}"
+
 
 _session = SessionState()
+
+NO_SESSION_ERROR = "Error: No session context set. Call set_context (or set_dm_context) first."
+
+
+def _session_dm_peers() -> Optional[frozenset[str]]:
+    return frozenset(_session.dm) if _session.dm else None
+
+
+def _session_history(num_messages: int) -> list[dict]:
+    if _session.dm:
+        return zulip_core.get_dm_messages(_session.dm, num_messages=num_messages)
+    return zulip_core.get_topic_messages(_session.stream, _session.topic, num_messages=num_messages)
+
+
+def _session_fetch_new(after_id: int) -> list[dict]:
+    if _session.dm:
+        return zulip_core.fetch_new_dm_messages(_session.dm, after_id, _session.my_user_id)
+    return zulip_core.fetch_new_messages(
+        _session.stream, _session.topic, after_id, _session.my_user_id,
+    )
+
+
+def _session_send(content: str) -> dict:
+    if _session.dm:
+        return zulip_core.send_direct_message(_session.dm, content)
+    return zulip_core.send_message(_session.stream, _session.topic, content)
+
+
+def _session_typing(op: str) -> dict:
+    if _session.dm:
+        return zulip_core.send_dm_typing(_session.dm, op)
+    return zulip_core.send_typing(_session.stream, _session.topic, op)
+
+
+def _session_register_queue() -> tuple[str, int, int]:
+    if _session.dm:
+        return zulip_core.register_dm_event_queue()
+    return zulip_core.register_event_queue(_session.stream, _session.topic)
 
 
 # ============================================================================
@@ -282,7 +336,7 @@ _session = SessionState()
 # ============================================================================
 
 def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
-    """Initialize (or re-initialize) the session.
+    """Initialize (or re-initialize) the session for a stream/topic.
 
     Sets session state, fetches the bot profile, and optionally fetches
     recent message history.  Does NOT start a typing indicator — callers
@@ -301,24 +355,46 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     if err:
         _logger.warning(f"_init_session() denied private stream access: stream={stream}")
         return err
+    return _begin_session(num_messages, stream=stream, topic=topic)
 
+
+def _init_dm_session(recipients: list[str], num_messages: int = 0) -> str:
+    """Initialize (or re-initialize) the session for a DM conversation.
+
+    Same contract as ``_init_session()``; ``recipients`` are the other
+    participants' emails (the bot's own address is ignored if included).
+    """
+    _logger.info(f"_init_dm_session() called: recipients={recipients}, num_messages={num_messages}")
+    return _begin_session(num_messages, dm=recipients)
+
+
+def _begin_session(num_messages: int, *, stream: Optional[str] = None,
+                   topic: Optional[str] = None, dm: Optional[list[str]] = None) -> str:
+    """Shared session setup for ``_init_session()`` and ``_init_dm_session()``."""
     profile = zulip_core.get_profile()
     if profile.get("result") != "success":
-        _logger.error(f"_init_session: get_profile() failed: {profile}")
+        _logger.error(f"_begin_session: get_profile() failed: {profile}")
         return f"Error: failed to fetch bot profile — check credentials and connectivity ({profile.get('msg', 'unknown error')})"
+
+    if dm is not None:
+        dm = sorted({e.strip().lower() for e in dm if e.strip()} - {profile.get("email", "").lower()})
+        if not dm:
+            return "Error: a DM context needs at least one other participant's email."
+
     _session.my_user_id = profile.get("user_id")
-    _logger.debug(f"_init_session: user_id={_session.my_user_id}")
+    _logger.debug(f"_begin_session: user_id={_session.my_user_id}")
 
     _session.stream = stream
     _session.topic = topic
+    _session.dm = dm
     _session.user_email = os.environ.get("SESSION_USER_EMAIL", "")
     _session.active = True
     _session.started_at = time.time()
 
-    messages = zulip_core.get_topic_messages(stream, topic, num_messages=num_messages) if num_messages > 0 else []
+    messages = _session_history(num_messages) if num_messages > 0 else []
     if messages:
         _session.last_seen_message_id = messages[-1]["id"]
-        _logger.debug(f"_init_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
+        _logger.debug(f"_begin_session: last_seen_message_id={_session.last_seen_message_id}, got {len(messages)} messages")
 
     # Override with trigger message ID so first react() targets the @mention
     trigger_id = None
@@ -328,9 +404,12 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
             trigger_id = int(trigger_msg_id)
             _session.last_seen_message_id = trigger_id
         except (ValueError, TypeError):
-            _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
-    visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
-    header = f"Session context set to {visibility} #{stream} > {topic}"
+            _logger.warning(f"_begin_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
+    if dm:
+        header = f"Session context set to {_session.where()}"
+    else:
+        visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
+        header = f"Session context set to {visibility} #{stream} > {topic}"
 
     msg_count = len(messages)
     header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
@@ -355,7 +434,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
             "You can also see which custom emoji people use via reactions on messages above."
         )
 
-    _logger.info("_init_session() completed successfully")
+    _logger.info("_begin_session() completed successfully")
     return output
 
 
@@ -391,7 +470,33 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
                 _logger.warning("set_context: on_set_context hook failed", exc_info=True)
 
         # Start typing — agent is about to do work
-        _auto_typing_start(stream, topic)
+        _auto_typing_start()
+
+    return result
+
+
+@mcp.tool()
+def set_dm_context(recipients: list[str], num_messages: int = 20) -> str:
+    """Initialize the session context for a direct-message conversation.
+    Use this instead of set_context() when chatting in a DM (1:1 or group).
+    After this, reply(), listen(), typing() and end_session() act on the DM.
+
+    Args:
+        recipients: Email addresses of the other people in the DM (not the bot).
+        num_messages: Number of recent messages to fetch for context (default 20).
+
+    Returns:
+        Confirmation with recent message history to get you up to speed.
+    """
+    try:
+        result = _init_dm_session(recipients, num_messages)
+    except Exception:
+        _logger.error("set_dm_context: _init_dm_session raised, resetting session", exc_info=True)
+        _session.reset()
+        return "Error: session initialization failed unexpectedly — check server logs"
+
+    if not result.startswith("Error:"):
+        _auto_typing_start()
 
     return result
 
@@ -408,10 +513,10 @@ def reply(content: str) -> str:
     """
     _logger.info(f"reply() called: content_len={len(content)}")
 
-    if not _session.active or not _session.stream or not _session.topic:
+    if not _session.has_target():
         _logger.warning("reply() called with no session context")
-        return "Error: No session context set. Call set_context first."
-    err = _reject_if_cannot_write(_session.stream)
+        return NO_SESSION_ERROR
+    err = None if _session.dm else _reject_if_cannot_write(_session.stream)
     if err:
         _logger.warning(f"reply() denied write access: stream={_session.stream}")
         return err
@@ -434,10 +539,7 @@ def reply(content: str) -> str:
     # Check for missed messages before sending
     missed = []
     if _session.last_seen_message_id:
-        missed = zulip_core.fetch_new_messages(
-            _session.stream, _session.topic,
-            _session.last_seen_message_id, _session.my_user_id,
-        )
+        missed = _session_fetch_new(_session.last_seen_message_id)
         if missed:
             _logger.debug(f"reply() found {len(missed)} missed messages")
 
@@ -448,9 +550,9 @@ def reply(content: str) -> str:
     too_long = _length_error(content, prefix)
     if too_long:
         return too_long
-    result = zulip_core.send_message(_session.stream, _session.topic, prefix + content)
+    result = _session_send(prefix + content)
     if result["result"] != "success":
-        _logger.error(f"reply() send_message failed: {result}")
+        _logger.error(f"reply() send failed: {result}")
         return f"Error sending message: {result.get('msg', 'Unknown error')}"
 
     sent_id = result.get("id")
@@ -510,10 +612,10 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
     Args:
         timeout_hours: Max wait time in hours. Default to 1.
     """
-    _logger.info(f"listen() START: timeout={timeout_hours}h, stream={_session.stream}")
+    _logger.info(f"listen() START: timeout={timeout_hours}h, where={_session.where()}")
 
-    if not _session.active or not _session.stream or not _session.topic:
-        return "Error: No session context set. Call set_context first."
+    if not _session.has_target():
+        return NO_SESSION_ERROR
 
     # Auto-stop typing — agent is just waiting, not working.
     _stop_typing_safe()
@@ -546,10 +648,7 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
         # Catch up on any messages that arrived since last_seen before
         # registering the queue (the queue only delivers future events).
         if _session.last_seen_message_id:
-            catchup = zulip_core.fetch_new_messages(
-                _session.stream, _session.topic,
-                _session.last_seen_message_id, _session.my_user_id,
-            )
+            catchup = _session_fetch_new(_session.last_seen_message_id)
             if catchup:
                 _session.last_seen_message_id = catchup[-1]["id"]
                 visible = zulip_core.filter_for_bot(catchup)
@@ -557,12 +656,11 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
                     return _build_listen_response(visible, listen_msg_id)
 
         # Subscribe to the stream so the narrowed queue works.
-        zulip_core.ensure_subscribed(_session.stream)
+        if not _session.dm:
+            zulip_core.ensure_subscribed(_session.stream)
 
-        # Register event queue narrowed to this stream+topic.
-        queue_id, last_event_id, longpoll_timeout = zulip_core.register_event_queue(
-            _session.stream, _session.topic,
-        )
+        # Register event queue narrowed to this stream+topic (or to all DMs).
+        queue_id, last_event_id, longpoll_timeout = _session_register_queue()
         _logger.info(f"listen() registered queue={queue_id}, longpoll_timeout={longpoll_timeout}s")
 
         start = time.time()
@@ -586,21 +684,26 @@ async def listen(timeout_hours: float, ctx: Context) -> str:
             except ValueError as e:
                 if "BAD_EVENT_QUEUE_ID" in str(e):
                     _logger.warning("listen() queue expired, re-registering")
-                    queue_id, last_event_id, longpoll_timeout = zulip_core.register_event_queue(
-                        _session.stream, _session.topic,
-                    )
+                    queue_id, last_event_id, longpoll_timeout = _session_register_queue()
                     continue
                 raise
 
             # Check for dismiss reaction (e.g. :stop_sign: on a bot message)
             for r in reactions:
-                if zulip_core.is_dismiss_reaction(r, _session.my_user_id, _session.stream, _session.topic):
+                if zulip_core.is_dismiss_reaction(r, _session.my_user_id, _session.stream,
+                                                  _session.topic, dm=_session_dm_peers()):
                     emoji = r.get("emoji_name", "stop_sign")
                     _logger.info(f"listen() dismissed via :{emoji}: reaction")
                     return (
                         f"Session dismissed: a user reacted with :{emoji}: on your message. "
                         "End the session gracefully by calling end_session(\"\")."
                     )
+
+            # The DM queue sees every DM conversation — keep only this one.
+            if _session.dm:
+                peers = _session_dm_peers()
+                messages = [m for m in messages
+                            if zulip_core.dm_peers(m, _session.my_user_id) == peers]
 
             # Filter own messages and /nobots
             messages = [m for m in messages if m.get("sender_id") != _session.my_user_id]
@@ -676,12 +779,12 @@ def _fire_session_end_hook():
             _logger.warning(f"on_session_end hook failed: {e}")
 
 
-def _auto_typing_start(stream: str, topic: str) -> None:
+def _auto_typing_start() -> None:
     """Start the typing indicator unless configure(auto_typing_start=False); never raises."""
-    if not _hooks["auto_typing_start"]:
+    if not _hooks["auto_typing_start"] or not _session.has_target():
         return
     try:
-        zulip_core.send_typing(stream, topic, "start")
+        _session_typing("start")
     except Exception:
         _logger.debug("auto typing start failed", exc_info=True)
 
@@ -689,16 +792,16 @@ def _auto_typing_start(stream: str, topic: str) -> None:
 def _after_reply_typing() -> None:
     """After a reply: typing "start" by default, "stop" when auto_typing_start=False."""
     if _hooks["auto_typing_start"]:
-        _auto_typing_start(_session.stream, _session.topic)
+        _auto_typing_start()
     else:
         _stop_typing_safe()
 
 
 def _stop_typing_safe():
     """Stop typing indicator, ignoring errors. Deliberately not gated by auto_typing_start — see CLAUDE.md."""
-    if _session.active and _session.stream and _session.topic:
+    if _session.has_target():
         try:
-            zulip_core.send_typing(_session.stream, _session.topic, "stop")
+            _session_typing("stop")
         except Exception:
             pass
 
@@ -721,7 +824,7 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
     Returns:
         Confirmation that the session has ended.
     """
-    _logger.info(f"end_session() called: stream={_session.stream}, topic={_session.topic}, message={bool(message)}")
+    _logger.info(f"end_session() called: where={_session.where()}, message={bool(message)}")
 
     # Write exit markers before anything else — even if session isn't active,
     # DM sessions may never call set_context() but still need the marker.
@@ -731,10 +834,10 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
         _logger.warning("end_session() called with no active session")
         return "Session ended."
 
-    stream, topic = _session.stream, _session.topic
+    where = _session.where()
 
     # Post farewell (default: ":wave: Signing off | {duration}")
-    if message and stream and topic:
+    if message and _session.has_target():
         duration_secs = int(time.time() - _session.started_at) if _session.started_at else 0
         duration_str = f"{duration_secs}s" if duration_secs < 60 else f"{duration_secs // 60}m"
 
@@ -750,9 +853,9 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
         if len(message) > budget:
             _logger.warning(f"end_session() trimmed oversized farewell to fit {zulip_core.MAX_MESSAGE_LENGTH}-char limit")
             message = message[:max(budget, 0)]
-        result = zulip_core.send_message(stream, topic, prefix + message + suffix)
+        result = _session_send(prefix + message + suffix)
         if result["result"] != "success":
-            _logger.error(f"end_session() farewell send_message failed: {result}")
+            _logger.error(f"end_session() farewell send failed: {result}")
         else:
             sent_id = result.get("id")
             _session.last_sent_message_id = sent_id
@@ -763,7 +866,7 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
 
     _session.reset()
     _logger.info("end_session() completed")
-    return f"Session ended. Was chatting in #{stream} > {topic}"
+    return f"Session ended. Was chatting in {where}"
 
 
 # Backwards-compatible alias
@@ -1211,9 +1314,9 @@ def typing() -> str:
     Returns:
         Confirmation or error message.
     """
-    if not _session.active or not _session.stream or not _session.topic:
-        return "Error: No session context set. Call set_context first."
-    result = zulip_core.send_typing(_session.stream, _session.topic, "start")
+    if not _session.has_target():
+        return NO_SESSION_ERROR
+    result = _session_typing("start")
     if result.get("result") != "success":
         return f"Error sending typing indicator: {result.get('msg', 'Unknown error')}"
     return "Typing indicator start."
@@ -1230,9 +1333,9 @@ def stop_typing() -> str:
     Returns:
         Confirmation or error message.
     """
-    if not _session.active or not _session.stream or not _session.topic:
-        return "Error: No session context set. Call set_context first."
-    result = zulip_core.send_typing(_session.stream, _session.topic, "stop")
+    if not _session.has_target():
+        return NO_SESSION_ERROR
+    result = _session_typing("stop")
     if result.get("result") != "success":
         return f"Error sending typing indicator: {result.get('msg', 'Unknown error')}"
     return "Typing indicator stop."
