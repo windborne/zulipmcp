@@ -63,7 +63,7 @@ owned by the gateway:
 mcp_servers:
   zulip:
     command: /home/you/.hermes/hermes-agent/venv/bin/python
-    args: ["-m", "zulipmcp.mcp"]
+    args: ["-m", "zulipmcp"]
     env:
       ZULIP_RC_PATH: ${ZULIP_RC_PATH}
       BOT_ALLOWED_PRIVATE_STREAMS: "__ALL__"

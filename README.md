@@ -24,7 +24,7 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
      "mcpServers": {
        "zulip": {
          "command": "uv",
-         "args": ["run", "python", "-m", "zulipmcp.mcp"]
+         "args": ["run", "python", "-m", "zulipmcp"]
        }
      }
    }
@@ -41,12 +41,12 @@ A bot only sees the channels it is subscribed to and the DMs sent to it. To let 
   "mcpServers": {
     "zulip": {
       "command": "uv",
-      "args": ["run", "python", "-m", "zulipmcp.mcp"],
+      "args": ["run", "python", "-m", "zulipmcp"],
       "env": {"ZULIP_RC_PATH": "/path/to/bot.zuliprc"}
     },
     "zulip-personal": {
       "command": "uv",
-      "args": ["run", "python", "-m", "zulipmcp.mcp"],
+      "args": ["run", "python", "-m", "zulipmcp"],
       "env": {
         "ZULIP_RC_PATH": "/path/to/personal.zuliprc",
         "ZULIPMCP_READ_ONLY": "1",
@@ -69,8 +69,8 @@ Read-only mode constrains this server, not an agent that can read the personal z
 
 | Entry Point | Description |
 |---|---|
-| `uv run python -m zulipmcp.mcp` | MCP server for Claude Code, Codex, and other MCP clients |
-| `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
+| `uv run python -m zulipmcp` | MCP server for Claude Code, Codex, and other MCP clients |
+| `uv run python -m zulipmcp --transport sse` | MCP server over SSE (for remote/web clients) |
 | `uv run python -m zulipmcp.launch_agent` | Launch one MCP-backed coding session without a listener |
 | `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns agent sessions |
 
