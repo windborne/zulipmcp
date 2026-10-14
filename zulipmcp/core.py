@@ -1047,7 +1047,9 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
     if topic:
         narrow.append({"operator": "topic", "operand": topic})
     if dm_with:
-        narrow.append({"operator": "dm", "operand": list(dm_with)})
+        # The server accepts a comma-separated email string or a list of user
+        # IDs here; a list of emails is rejected.
+        narrow.append({"operator": "dm", "operand": ",".join(dm_with)})
     if sender:
         narrow.append({"operator": "sender", "operand": sender})
     if query:

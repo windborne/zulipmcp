@@ -28,6 +28,20 @@ class DictCache:
         self.data[key] = value
 
 
+def _dm_operand_error(narrow: list[dict]) -> Optional[str]:
+    """Mirror the server's check_string_or_int_list validation of ``dm``."""
+    for term in narrow:
+        if term["operator"] != "dm":
+            continue
+        operand = term["operand"]
+        if isinstance(operand, str):
+            continue
+        for i, item in enumerate(operand):
+            if not isinstance(item, int):
+                return f"operand[{i}] is not an integer"
+    return None
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.email = BOT
@@ -46,6 +60,9 @@ class FakeClient:
             hits = [m for m in self.messages if m["id"] == request["anchor"]]
             return {"result": "success", "messages": [dict(m) for m in hits]}
         self.requests.append(request)
+        error = _dm_operand_error(request.get("narrow", []))
+        if error:
+            return {"result": "error", "msg": error}
         if self.response is not None:
             return self.response
         return {"result": "success", "messages": [dict(m) for m in self.messages]}
@@ -97,7 +114,7 @@ def utc(*args: int) -> datetime:
 @pytest.mark.parametrize("kwargs, expected", [
     ({"stream": "general", "topic": "t"},
      [{"operator": "channel", "operand": "general"}, {"operator": "topic", "operand": "t"}]),
-    ({"dm_with": [ALICE, BOB]}, [{"operator": "dm", "operand": [ALICE, BOB]}]),
+    ({"dm_with": [ALICE, BOB]}, [{"operator": "dm", "operand": f"{ALICE},{BOB}"}]),
     ({"sender": ALICE}, [{"operator": "sender", "operand": ALICE}]),
     ({"query": "deploy plan"}, [{"operator": "search", "operand": "deploy plan"}]),
     ({"stream": "general", "sender": ALICE, "query": "x"},
@@ -105,11 +122,25 @@ def utc(*args: int) -> datetime:
       {"operator": "sender", "operand": ALICE},
       {"operator": "search", "operand": "x"}]),
     ({"dm_with": [ALICE], "query": "x"},
-     [{"operator": "dm", "operand": [ALICE]}, {"operator": "search", "operand": "x"}]),
+     [{"operator": "dm", "operand": ALICE}, {"operator": "search", "operand": "x"}]),
     ({"stream": "", "topic": "", "dm_with": [], "sender": "", "query": ""}, []),
 ])
 def test_build_narrow(kwargs: dict, expected: list[dict]) -> None:
     assert core.build_narrow(**kwargs) == expected
+
+
+def test_fake_server_rejects_email_list_dm_operand(client: FakeClient) -> None:
+    with pytest.raises(ValueError, match=r"operand\[0\] is not an integer"):
+        core.fetch_narrow([{"operator": "dm", "operand": [ALICE]}])
+    core.fetch_narrow([{"operator": "dm", "operand": [7, 8]}])
+
+
+def test_dm_narrows_pass_server_validation(client: FakeClient) -> None:
+    client.messages = [dm_msg(5, [ALICE, BOB, BOT], content="group hello")]
+
+    assert "group hello" in get_messages(dm_with=[ALICE, BOB])
+    assert "group hello" in get_messages(message_id=5)
+    assert "group hello" in search_messages(query="hello", dm_with=[ALICE, BOB])
 
 
 def test_search_passes_narrow_to_server(client: FakeClient) -> None:
@@ -266,7 +297,7 @@ def test_get_messages_reads_dm(client: FakeClient) -> None:
 
     out = get_messages(dm_with=[ALICE])
 
-    assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": [ALICE]}]
+    assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": ALICE}]
     assert client.requests[0]["anchor"] == "newest"
     assert out.startswith(f"Messages from DM with {ALICE}:")
     assert "hello there" in out
@@ -278,7 +309,7 @@ def test_get_messages_dm_message_id_derives_partners(client: FakeClient) -> None
     out = get_messages(message_id=5)
 
     request = client.requests[0]
-    assert request["narrow"] == [{"operator": "dm", "operand": [ALICE, BOB]}]
+    assert request["narrow"] == [{"operator": "dm", "operand": f"{ALICE},{BOB}"}]
     assert request["anchor"] == 6
     assert out.startswith(f"History for DM with {ALICE}, {BOB} (around message 5):")
 
@@ -288,7 +319,7 @@ def test_get_messages_self_dm_message_id(client: FakeClient) -> None:
 
     get_messages(message_id=5)
 
-    assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": [BOT]}]
+    assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": BOT}]
 
 
 def test_get_messages_unknown_message_id(client: FakeClient) -> None:
