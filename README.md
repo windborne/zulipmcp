@@ -37,8 +37,10 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 A bot only sees the channels it is subscribed to and the DMs sent to it. To let an agent read everything you can see while it still posts as the bot, run two servers: one on the bot's zuliprc, and a read-only one on a zuliprc holding your personal [API key](https://zulip.com/api/api-keys). Installing the `zulipmcp` command once keeps launches from re-resolving dependencies:
 
 ```bash
-uv tool install git+https://github.com/windborne/zulipmcp.git
+uv tool install git+https://github.com/windborne/zulipmcp.git   # update later with: uv tool upgrade zulipmcp
 ```
+
+Desktop MCP clients often don't inherit your shell's `PATH`; if `zulipmcp` isn't found, use the absolute path under `uv tool dir --bin`.
 
 ```json
 {
