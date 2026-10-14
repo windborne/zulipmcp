@@ -225,7 +225,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
 | `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only -- the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
-| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. |
+| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. `__ALL__` also permits reading DM history (`get_messages`/`search_messages`); otherwise those tools refuse DMs. |
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
 | `ZULIPMCP_READ_ONLY` | When `1` or `true`, the server cannot write to Zulip: write tools are hidden, session auto-init is skipped, and the client refuses every non-GET request at the HTTP layer -- for running on a personal API key without posting as that person. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache base directory (defaults to system temp dir). Each site and account gets its own subdirectory, so servers running as different users never share cached data. |

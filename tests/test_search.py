@@ -95,6 +95,12 @@ def client(monkeypatch: pytest.MonkeyPatch) -> FakeClient:
     return fake
 
 
+@pytest.fixture
+def dm_reads(client: FakeClient, monkeypatch: pytest.MonkeyPatch) -> FakeClient:
+    monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "__ALL__")
+    return client
+
+
 def stream_msg(msg_id: int, timestamp: int = 1000, stream: str = "general",
                topic: str = "t", content: str = "hi", sender: str = "Alice") -> dict:
     return {
@@ -147,8 +153,8 @@ def test_fake_server_rejects_email_list_dm_operand(client: FakeClient) -> None:
     core.fetch_narrow([{"operator": "dm", "operand": [7, 8]}])
 
 
-def test_dm_narrows_pass_server_validation(client: FakeClient) -> None:
-    client.messages = [dm_msg(5, [ALICE, BOB, BOT], content="group hello")]
+def test_dm_narrows_pass_server_validation(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [dm_msg(5, [ALICE, BOB, BOT], content="group hello")]
 
     assert "group hello" in get_messages(dm_with=[ALICE, BOB])
     assert "group hello" in get_messages(message_id=5)
@@ -201,7 +207,7 @@ def test_before_requires_feature_level(client: FakeClient) -> None:
         core.fetch_narrow([], before=utc(2025, 3, 1))
     assert client.requests == []
     assert "requires Zulip 12.0+" in search_messages(query="x", before="2025-03-01")
-    assert "requires Zulip 12.0+" in get_messages(dm_with=[ALICE], before="2025-03-01")
+    assert "requires Zulip 12.0+" in get_messages(stream="general", topic="t", before="2025-03-01")
 
 
 def test_before_filters_anchor_and_trims(client: FakeClient) -> None:
@@ -305,19 +311,22 @@ def test_parse_rejects_invalid(value: str) -> None:
 
 def test_tools_report_invalid_dates(client: FakeClient) -> None:
     assert search_messages(query="x", after="soon").startswith("Error: Invalid date")
-    assert get_messages(dm_with=[ALICE], before="soon").startswith("Error: Invalid date")
+    assert get_messages(stream="general", topic="t", before="soon").startswith("Error: Invalid date")
     assert client.requests == []
 
 
 # --- stream visibility -------------------------------------------------------
 
-def test_private_hit_dropped_unless_allowlisted(
+def test_private_and_dm_hits_follow_allowlist(
     client: FakeClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client.messages = [stream_msg(1, stream="general"), stream_msg(2, stream="secret"),
                        dm_msg(3, [ALICE, BOT])]
 
-    assert [m["id"] for m in core.fetch_narrow([]).messages] == [1, 3]
+    assert [m["id"] for m in core.fetch_narrow([]).messages] == [1]
+
+    monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "secret")
+    assert [m["id"] for m in core.fetch_narrow([]).messages] == [1, 2]
 
     monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "__ALL__")
     assert [m["id"] for m in core.fetch_narrow([]).messages] == [1, 2, 3]
@@ -354,34 +363,34 @@ def test_api_error_is_reported(client: FakeClient) -> None:
 
 # --- get_messages ------------------------------------------------------------
 
-def test_get_messages_reads_dm(client: FakeClient) -> None:
-    client.messages = [dm_msg(1, [ALICE, BOT], content="hello there")]
+def test_get_messages_reads_dm(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [dm_msg(1, [ALICE, BOT], content="hello there")]
 
     out = get_messages(dm_with=[ALICE])
 
-    assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": ALICE}]
-    assert client.requests[0]["anchor"] == "newest"
+    assert dm_reads.requests[0]["narrow"] == [{"operator": "dm", "operand": ALICE}]
+    assert dm_reads.requests[0]["anchor"] == "newest"
     assert out.startswith(f"Messages from DM with {ALICE}:")
     assert "hello there" in out
 
 
-def test_get_messages_dm_message_id_derives_partners(client: FakeClient) -> None:
-    client.messages = [dm_msg(5, [ALICE, BOB, BOT])]
+def test_get_messages_dm_message_id_derives_partners(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [dm_msg(5, [ALICE, BOB, BOT])]
 
     out = get_messages(message_id=5)
 
-    request = client.requests[0]
+    request = dm_reads.requests[0]
     assert request["narrow"] == [{"operator": "dm", "operand": f"{ALICE},{BOB},{BOT}"}]
     assert (request["anchor"], request["include_anchor"]) == (6, False)
     assert out.startswith(f"History for DM with {ALICE}, {BOB} (up to message 5):")
 
 
-def test_get_messages_self_dm_message_id(client: FakeClient) -> None:
-    client.messages = [dm_msg(5, [BOT])]
+def test_get_messages_self_dm_message_id(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [dm_msg(5, [BOT])]
 
     out = get_messages(message_id=5)
 
-    assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": BOT}]
+    assert dm_reads.requests[0]["narrow"] == [{"operator": "dm", "operand": BOT}]
     assert out.startswith(f"History for DM with {BOT} (up to message 5):")
 
 
@@ -467,6 +476,48 @@ def test_get_messages_target_validation(client: FakeClient, kwargs: dict, error:
     assert get_messages(**kwargs) == error
 
 
+# --- DM reads ----------------------------------------------------------------
+
+@pytest.mark.parametrize("allowlist", [None, "secret", '["general", "secret"]'])
+def test_dm_reads_denied_without_allow_all(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch, allowlist: Optional[str],
+) -> None:
+    if allowlist is not None:
+        monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", allowlist)
+    client.messages = [stream_msg(4, content="public hello"),
+                       dm_msg(5, [ALICE, BOT], content="private hello")]
+
+    assert not core.dm_reads_allowed()
+    assert get_messages(dm_with=[ALICE]) == mcp.DM_READS_ERROR
+    assert get_messages(message_id=5) == mcp.DM_READS_ERROR
+    assert search_messages(query="hello", dm_with=[ALICE]) == mcp.DM_READS_ERROR
+    assert client.requests == []
+
+    out = search_messages(query="hello")
+    assert "public hello" in out and "private hello" not in out
+    assert "__ALL__" in mcp.DM_READS_ERROR
+
+
+@pytest.mark.parametrize("allowlist", ["__ALL__", '["__ALL__"]'])
+def test_dm_reads_allowed_with_allow_all(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch, allowlist: str,
+) -> None:
+    monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", allowlist)
+    client.messages = [dm_msg(5, [ALICE, BOT], content="private hello")]
+
+    assert core.dm_reads_allowed()
+    assert "private hello" in get_messages(dm_with=[ALICE])
+    assert "private hello" in get_messages(message_id=5)
+    assert "private hello" in search_messages(query="hello", dm_with=[ALICE])
+    assert "private hello" in search_messages(query="hello")
+
+
+def test_single_message_tools_ignore_dm_rule(client: FakeClient) -> None:
+    client.messages = [dm_msg(5, [ALICE, BOT], content="private hello")]
+
+    assert "private hello" in getattr(mcp.get_message_by_id, "fn", mcp.get_message_by_id)(5)
+
+
 # --- search_messages ---------------------------------------------------------
 
 @pytest.mark.parametrize("kwargs, error", [
@@ -480,8 +531,8 @@ def test_search_validation(client: FakeClient, kwargs: dict, error: str) -> None
     assert client.requests == []
 
 
-def test_search_header_and_output(client: FakeClient) -> None:
-    client.messages = [
+def test_search_header_and_output(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [
         stream_msg(7, 100, content="deploy now"),
         dm_msg(9, [ALICE, BOT], timestamp=110, content="deploy later"),
         stream_msg(8, 105, content="/nb deploy secret"),

@@ -58,6 +58,7 @@ PRIVATE_STREAM_ERROR = (
     "Error: Private stream access denied for this session. "
     "You can only access the private stream where you were pinged."
 )
+DM_READS_ERROR = "Error: Reading DM history requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
 WRITE_STREAM_ERROR = (
     "Error: Stream write access denied for this session. "
     "This stream is not allowed by BOT_ALLOWED_WRITE_STREAMS."
@@ -923,6 +924,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                 return f"Message {message_id} not found or not accessible."
 
     if dm_with:
+        if not zulip_core.dm_reads_allowed():
+            return DM_READS_ERROR
         label = _dm_label(dm_with)
     else:
         if not stream or not topic:
@@ -983,6 +986,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         return "Error: topic requires stream."
     if dm_with and stream:
         return "Error: dm_with cannot be combined with stream/topic."
+    if dm_with and not zulip_core.dm_reads_allowed():
+        return DM_READS_ERROR
     if stream:
         err = _reject_if_private(stream)
         if err:

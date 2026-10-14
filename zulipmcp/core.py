@@ -249,6 +249,15 @@ def is_private_stream_allowed(stream_name: str) -> bool:
     return stream_name.lower() in allowed
 
 
+def dm_reads_allowed() -> bool:
+    """Whether DM history may be read: only when every private stream is allowed.
+
+    A shared bot's DMs belong to many users, so they get the strictest
+    private-stream setting rather than a separate switch.
+    """
+    return _ALL_PRIVATE_STREAMS in _allowed_private_streams()
+
+
 def is_stream_write_allowed(stream_name: str) -> bool:
     """Whether the current process is allowed to send to this stream."""
     allowed = _allowed_write_streams()
@@ -1072,7 +1081,9 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
 
 
 def _is_readable(msg: dict, skip_ignored: bool) -> bool:
-    """Whether a fetched message passes the private-stream allowlist and ignore list."""
+    """Whether a fetched message passes the DM, private-stream, and ignore rules."""
+    if msg.get("type") == "private":
+        return dm_reads_allowed()
     if msg.get("type") != "stream":
         return True
     stream = msg.get("display_recipient", "")
@@ -1101,9 +1112,10 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
 
     The page ends just before ``before_message_id`` (exclusive) if given,
     else just before the ``before`` datetime, else at the newest message.
-    ``after`` is a client-side lower bound. Messages in private streams
-    outside the allowlist are dropped even when the server returns them, as
-    are ignored streams unless the narrow names a channel.
+    ``after`` is a client-side lower bound. DMs (unless
+    :func:`dm_reads_allowed`) and messages in private streams outside the
+    allowlist are dropped even when the server returns them, as are ignored
+    streams unless the narrow names a channel.
 
     Raises ValueError on API errors, when ``after`` is not earlier than
     ``before``, or when ``before`` sets the anchor on a server older than
