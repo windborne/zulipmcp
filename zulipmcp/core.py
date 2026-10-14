@@ -1125,7 +1125,7 @@ def send_typing(stream: str, topic: str, op: str = "start") -> dict:
     Returns API result dict.
     """
     client = get_client()
-    stream_id = _stream_id_get_cache().get(stream)
+    stream_id = _stream_id_cache.get(stream)
     if stream_id is None:
         stream_result = client.get_stream_id(stream)
         if stream_result["result"] != "success":
