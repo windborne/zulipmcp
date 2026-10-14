@@ -5,6 +5,7 @@ import re
 import time
 import tempfile
 import json
+import math
 import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
@@ -278,7 +279,7 @@ def is_stream_write_allowed(stream_name: str) -> bool:
 
 def _stream_write_error(stream: str) -> Optional[dict]:
     """Return an API-style error dict if writes to this stream are forbidden."""
-    if is_stream_private(stream) and not is_private_stream_allowed(stream):
+    if not is_private_stream_allowed(stream):
         return {"result": "error", "msg": f"Private stream access denied: {stream}"}
     if not is_stream_write_allowed(stream):
         return {"result": "error", "msg": f"Stream write access denied: {stream}"}
@@ -1080,35 +1081,52 @@ def _is_readable(msg: dict) -> bool:
     return is_private_stream_allowed(msg.get("display_recipient", ""))
 
 
-_DM_OPERATORS = frozenset({"dm", "dm-including", "pm-with", "group-pm-with"})
+class ReadScopeError(ValueError):
+    """Raised when a narrow doesn't name a scope this process may read."""
+
+
+# The server still accepts the underscore spellings of the legacy operators.
+_DM_OPERATORS = frozenset({"dm", "dm-including", "pm-with", "pm_with", "group-pm-with", "group_pm_with"})
 _CHANNEL_OPERATORS = frozenset({"channel", "stream"})
+_CHANNELS_OPERATORS = frozenset({"channels", "streams"})
 
 
-def _names_channel(narrow: list[dict]) -> bool:
-    """Whether a non-negated term pins the narrow to one channel."""
-    return any(t.get("operator") in _CHANNEL_OPERATORS and not t.get("negated") for t in narrow)
+def _channel_operands(narrow: list[dict]) -> list[str]:
+    """Operands of the non-negated ``channel``/``stream`` terms that are names."""
+    return [t["operand"] for t in narrow
+            if isinstance(t, dict) and t.get("operator") in _CHANNEL_OPERATORS
+            and t.get("negated") is not True and isinstance(t.get("operand"), str)]
 
 
 def _check_read_scope(narrow: list[dict]) -> None:
-    """Raise ValueError unless the narrow names a scope this process may read.
+    """Raise ReadScopeError unless the narrow names a scope this process may read.
 
     Don't subtract hidden scopes with negated terms instead: narrows travel
     in the GET query string, which breaks past a few dozen terms.
     """
     if dm_reads_allowed():
         return
-    terms = [t for t in narrow if not t.get("negated")]
+    if not all(isinstance(t, dict) for t in narrow):
+        raise ReadScopeError("Narrow terms must be dicts with operator and operand.")
+    # The server parses a "false" string as False, so only True negates.
+    terms = [t for t in narrow if t.get("negated") is not True]
     for term in terms:
         operator, operand = term.get("operator"), term.get("operand")
         if operator in _DM_OPERATORS or (operator == "is" and operand in ("dm", "private")):
-            raise ValueError(DM_READS_DENIED)
-    channels = [str(t.get("operand")) for t in terms if t.get("operator") in _CHANNEL_OPERATORS]
+            raise ReadScopeError(DM_READS_DENIED)
+        # with: moves the narrow to the target message's conversation.
+        if operator == "with":
+            raise ReadScopeError("The with operator requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__.")
+        # The server resolves an int as a channel ID; the allowlist holds names.
+        if operator in _CHANNEL_OPERATORS and not isinstance(operand, str):
+            raise ReadScopeError(f"Channel operands must be names, not {type(operand).__name__}.")
+    channels = _channel_operands(terms)
     if channels:
         if not all(is_private_stream_allowed(c) for c in channels):
-            raise ValueError(PRIVATE_STREAM_DENIED)
+            raise ReadScopeError(PRIVATE_STREAM_DENIED)
         return
     # Not channels:archived, which includes private archived channels.
-    if any(t.get("operator") in ("channels", "streams") and t.get("operand") in ("public", "web-public")
+    if any(t.get("operator") in _CHANNELS_OPERATORS and t.get("operand") in ("public", "web-public")
            for t in terms):
         return
     message = ("Reading without naming a channel requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__; "
@@ -1116,7 +1134,7 @@ def _check_read_scope(narrow: list[dict]) -> None:
     allowlisted = allowlisted_private_streams()
     if allowlisted:
         message += f" Allowlisted private channels: {', '.join(allowlisted)}."
-    raise ValueError(message)
+    raise ReadScopeError(message)
 
 
 class MessagePage(NamedTuple):
@@ -1137,18 +1155,24 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
 
     The page ends just before ``before_message_id`` (exclusive) if given,
     else just before the ``before`` datetime, else at the newest message.
-    ``after`` is a client-side lower bound. The narrow is sent as given.
-    Unreadable messages the server returns anyway are dropped, as are
-    ignored streams unless the narrow names a channel; the paging cursor
-    still counts them.
+    ``after`` is a client-side lower bound. Naive bounds are in ``TIMEZONE``,
+    and both widen to whole seconds to match Zulip's integer timestamps.
+    The narrow is sent as given. Unreadable messages the server returns
+    anyway are dropped, as are ignored streams unless the narrow names a
+    channel; the paging cursor still counts them.
 
-    Raises ValueError before fetching when the narrow names no readable
+    Raises ReadScopeError before fetching when the narrow names no readable
     scope: without ``BOT_ALLOWED_PRIVATE_STREAMS=__ALL__`` it must not
-    select DMs and must name an allowed channel or public channels. Also
-    raises on API errors, when ``after`` is not earlier than ``before``, or
-    when ``before`` sets the anchor on a server older than Zulip 12.0.
+    select DMs and must name an allowed channel (names only) or public
+    channels. Raises ValueError on API errors, when ``after`` is not
+    earlier than ``before``, or when ``before`` sets the anchor on a server
+    older than Zulip 12.0.
     """
     _check_read_scope(narrow)
+    if after is not None and after.tzinfo is None:
+        after = after.replace(tzinfo=TIMEZONE)
+    if before is not None and before.tzinfo is None:
+        before = before.replace(tzinfo=TIMEZONE)
     if after is not None and before is not None and after >= before:
         raise ValueError("after must be earlier than before")
     client = get_client()
@@ -1184,14 +1208,14 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
 
     msgs = raw
     if before is not None:
-        cutoff = before.timestamp()
+        cutoff = math.ceil(before.timestamp())
         msgs = [m for m in msgs if m.get("timestamp", 0) < cutoff]
     page = msgs[-limit:]
     trimmed = len(page) < len(msgs)
 
     reached_after = False
     if after is not None:
-        floor = after.timestamp()
+        floor = math.floor(after.timestamp())
         in_range = [m for m in page if m.get("timestamp", 0) >= floor]
         reached_after = len(in_range) < len(page)
         page = in_range
@@ -1202,7 +1226,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
         older_than = oldest[0]["id"]
 
     readable = [m for m in page if _is_readable(m)]
-    if _ignored_streams and not _names_channel(narrow):
+    if _ignored_streams and not _channel_operands(narrow):
         readable = [m for m in readable if m.get("type") != "stream"
                     or m.get("display_recipient", "").lower() not in _ignored_streams]
     return MessagePage(readable, older_than)
@@ -1445,6 +1469,8 @@ def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
     target = result["messages"][0]
     if target.get("id") != message_id or target.get("type") != "stream":
         return None
+    if not _is_readable(target):
+        return None
     stream = target.get("display_recipient", "")
     topic = target.get("subject", "")
     if not stream or not topic:
@@ -1468,14 +1494,16 @@ def get_custom_profile_fields() -> list[dict]:
 
 def get_user_info(email: str) -> Optional[dict]:
     """Get user info by email, including custom profile fields. Returns user dict or None."""
+    # Quoted so "/" or "?" in the email can't steer the request to another
+    # endpoint once the client joins it onto the base URL.
     result = get_client().call_endpoint(
-        url=f"/users/{email}",
+        url=f"/users/{urllib.parse.quote(email, safe='@+')}",
         method="GET",
         request={"include_custom_profile_fields": True},
     )
     if result.get("result") != "success":
         return None
-    return result["user"]
+    return result.get("user")
 
 
 def get_message_by_id(message_id: int) -> Optional[dict]:
@@ -1602,7 +1630,7 @@ def get_subscribed_streams() -> list[dict]:
         return []
     subs = result.get("subscriptions", [])
     allowed = _allowed_private_streams()
-    if allowed is not None:
+    if _ALL_PRIVATE_STREAMS not in allowed:
         subs = [
             s for s in subs
             if not s.get("invite_only", False) or s["name"].lower() in allowed

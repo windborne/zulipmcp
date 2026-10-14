@@ -51,11 +51,11 @@ from . import core as zulip_core
 mcp = FastMCP("Zulip Messaging")
 
 # Tag every tool that writes to Zulip; run_server() hides them in read-only
-# mode. Tagging is UX only; _ReadOnlyClient enforces.
+# mode. Tagging is UX only; _ReadOnlyAdapter (mounted by _ReadOnlyClient)
+# enforces.
 WRITE_TAG = "write"
 
 PRIVATE_STREAM_ERROR = f"Error: {zulip_core.PRIVATE_STREAM_DENIED}"
-DM_READS_ERROR = f"Error: {zulip_core.DM_READS_DENIED}"
 WRITE_STREAM_ERROR = (
     "Error: Stream write access denied for this session. "
     "This stream is not allowed by BOT_ALLOWED_WRITE_STREAMS."

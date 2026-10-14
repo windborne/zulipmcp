@@ -28,9 +28,6 @@ class DictCache:
     def set(self, key: Any, value: Any, expire: Optional[int] = None) -> None:
         self.data[key] = value
 
-    def delete(self, key: Any) -> None:
-        self.data.pop(key, None)
-
 
 def _dm_operand_error(narrow: list[dict]) -> Optional[str]:
     """Mirror the server's check_string_or_int_list validation of ``dm``."""
@@ -276,6 +273,40 @@ def test_after_filters_and_stops_paging(dm_reads: FakeClient) -> None:
     assert page.older_than == 2
 
 
+def test_naive_bounds_use_configured_timezone(
+    dm_reads: FakeClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "TIMEZONE", ZoneInfo("Asia/Tokyo"))
+    cutoff = int(utc(2025, 3, 1).timestamp())
+    dm_reads.messages = [stream_msg(1, cutoff - 3600), stream_msg(2, cutoff - 1),
+                         stream_msg(3, cutoff)]
+
+    page = core.fetch_narrow([], after=datetime(2025, 3, 1, 8, 0),
+                             before=datetime(2025, 3, 1, 9, 0))
+
+    assert dm_reads.requests[0]["anchor_date"] == "2025-03-01T00:00:00+00:00"
+    assert [m["id"] for m in page.messages] == [1, 2]
+
+
+def test_naive_and_aware_bounds_mix(dm_reads: FakeClient) -> None:
+    core.fetch_narrow([], after=datetime(2025, 3, 1), before=utc(2025, 3, 2))
+
+    with pytest.raises(ValueError, match="after must be earlier than before"):
+        core.fetch_narrow([], after=datetime(2025, 3, 2), before=utc(2025, 3, 1))
+
+
+def test_bounds_compare_whole_seconds(dm_reads: FakeClient) -> None:
+    # Zulip timestamps are whole seconds, so a message stamped 200 may have
+    # been sent after 200.5.
+    dm_reads.messages = [stream_msg(1, 199), stream_msg(2, 200), stream_msg(3, 201),
+                         stream_msg(4, 202)]
+
+    page = core.fetch_narrow([], after=datetime.fromtimestamp(200.5, timezone.utc),
+                             before=datetime.fromtimestamp(201.5, timezone.utc))
+
+    assert [m["id"] for m in page.messages] == [2, 3]
+
+
 def test_after_must_precede_before(dm_reads: FakeClient) -> None:
     with pytest.raises(ValueError, match="after must be earlier than before"):
         core.fetch_narrow([], after=utc(2025, 3, 1), before=utc(2025, 3, 1))
@@ -358,11 +389,14 @@ def test_tools_report_invalid_dates(client: FakeClient) -> None:
 UNSCOPED = "Reading without naming a channel requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__"
 
 
-def test_error_strings_unchanged() -> None:
+DM_READS_ERROR = f"Error: {core.DM_READS_DENIED}"
+
+
+def test_error_strings() -> None:
     assert mcp.PRIVATE_STREAM_ERROR == (
         "Error: Private stream access denied: not in BOT_ALLOWED_PRIVATE_STREAMS."
     )
-    assert mcp.DM_READS_ERROR == "Error: Reading DMs requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
+    assert DM_READS_ERROR == "Error: Reading DMs requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
 
 
 @pytest.mark.parametrize("narrow", [
@@ -373,7 +407,7 @@ def test_error_strings_unchanged() -> None:
     [{"operator": "channel", "operand": "general", "negated": True}],
 ])
 def test_gate_rejects_unscoped_narrow(client: FakeClient, narrow: list[dict]) -> None:
-    with pytest.raises(ValueError, match=UNSCOPED) as exc:
+    with pytest.raises(core.ReadScopeError, match=UNSCOPED) as exc:
         core.fetch_narrow(narrow)
     assert "Allowlisted" not in str(exc.value)
     assert client.requests == []
@@ -393,27 +427,76 @@ def test_gate_unscoped_error_lists_allowlist(
     {"operator": "dm", "operand": ALICE},
     {"operator": "dm-including", "operand": ALICE},
     {"operator": "pm-with", "operand": ALICE},
+    {"operator": "pm_with", "operand": ALICE},
     {"operator": "group-pm-with", "operand": ALICE},
+    {"operator": "group_pm_with", "operand": ALICE},
     {"operator": "is", "operand": "dm"},
     {"operator": "is", "operand": "private"},
+    {"operator": "is", "operand": "dm", "negated": "false"},
+    {"operator": "dm", "operand": ALICE, "negated": 0},
 ])
 def test_gate_rejects_dm_narrow(
     client: FakeClient, monkeypatch: pytest.MonkeyPatch, term: dict,
 ) -> None:
     monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "secret")
 
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(core.ReadScopeError) as exc:
         core.fetch_narrow([*PUBLIC, term])
-    assert f"Error: {exc.value}" == mcp.DM_READS_ERROR
+    assert f"Error: {exc.value}" == DM_READS_ERROR
     assert client.requests == []
 
 
 @pytest.mark.parametrize("operator", ["channel", "stream"])
 def test_gate_rejects_disallowed_private_channel(client: FakeClient, operator: str) -> None:
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(core.ReadScopeError) as exc:
         core.fetch_narrow([{"operator": operator, "operand": "secret"}])
     assert f"Error: {exc.value}" == mcp.PRIVATE_STREAM_ERROR
     assert client.requests == []
+
+
+@pytest.mark.parametrize("narrow", [
+    [["channel", "general"]],
+    [*PUBLIC, ["dm", ALICE]],
+    [*PUBLIC, "is:dm"],
+    [*PUBLIC, None],
+])
+def test_gate_rejects_malformed_terms(client: FakeClient, narrow: list) -> None:
+    with pytest.raises(core.ReadScopeError, match="must be dicts"):
+        core.fetch_narrow(narrow)
+    assert client.requests == []
+
+
+@pytest.mark.parametrize("narrow", [
+    [{"operator": "channel", "operand": "general"}, {"operator": "with", "operand": 9001}],
+    [*PUBLIC, {"operator": "with", "operand": "9001"}],
+])
+def test_gate_rejects_with_operator(client: FakeClient, narrow: list[dict]) -> None:
+    with pytest.raises(core.ReadScopeError, match="with operator requires"):
+        core.fetch_narrow(narrow)
+    assert client.requests == []
+
+
+@pytest.mark.parametrize("operator", ["channel", "stream"])
+@pytest.mark.parametrize("operand", [7, 7.0, ["general"], None])
+def test_gate_rejects_non_name_channel_operand(
+    client: FakeClient, operator: str, operand: Any,
+) -> None:
+    with pytest.raises(core.ReadScopeError, match="Channel operands must be names"):
+        core.fetch_narrow([*PUBLIC, {"operator": operator, "operand": operand}])
+    assert client.requests == []
+
+
+def test_gate_ignores_negated_with_and_dm_terms(client: FakeClient) -> None:
+    narrow = [*PUBLIC, {"operator": "with", "operand": 1, "negated": True},
+              {"operator": "dm", "operand": ALICE, "negated": True}]
+
+    core.fetch_narrow(narrow)
+
+    assert client.requests[0]["narrow"] == narrow
+
+
+def test_read_scope_error_is_value_error() -> None:
+    assert issubclass(core.ReadScopeError, ValueError)
 
 
 def test_gate_fails_closed_when_stream_list_errors(client: FakeClient) -> None:
@@ -594,6 +677,17 @@ def test_get_message_by_id_rejects_substituted_message(client: FakeClient) -> No
     assert core.get_message_by_id(7)["id"] == 7
 
 
+def test_discover_message_context_hides_unreadable_stream(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.messages = [stream_msg(5, stream="secret", topic="plans")]
+
+    assert core.discover_message_context(5) is None
+
+    monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "secret")
+    assert core.discover_message_context(5) == ("secret", "plans")
+
+
 def test_get_topic_messages_is_inclusive(client: FakeClient) -> None:
     client.messages = [stream_msg(i) for i in range(1, 6)]
 
@@ -646,14 +740,14 @@ def test_dm_reads_denied_without_allow_all(
                        dm_msg(5, [ALICE, BOT], content="private hello")]
 
     assert not core.dm_reads_allowed()
-    assert get_messages(dm_with=[ALICE]) == mcp.DM_READS_ERROR
+    assert get_messages(dm_with=[ALICE]) == DM_READS_ERROR
     assert get_messages(message_id=5) == "Message 5 not found or not accessible."
-    assert search_messages(query="hello", dm_with=[ALICE]) == mcp.DM_READS_ERROR
+    assert search_messages(query="hello", dm_with=[ALICE]) == DM_READS_ERROR
     assert client.requests == []
 
     out = search_messages(query="hello")
     assert "public hello" in out and "private hello" not in out
-    assert "__ALL__" in mcp.DM_READS_ERROR
+    assert "__ALL__" in DM_READS_ERROR
 
 
 @pytest.mark.parametrize("allowlist", ["__ALL__", '["__ALL__"]'])
@@ -823,6 +917,45 @@ def test_search_header_reports_older_page(client: FakeClient) -> None:
     out = search_messages(query="x", num_messages=2)
 
     assert out.startswith(f"Search as {BOT} (2 results; older: before_message_id=4)")
+
+
+# --- user info and subscriptions ---------------------------------------------
+
+@pytest.mark.parametrize("email, url", [
+    (ALICE, f"/users/{ALICE}"),
+    ("bob+tag@example.com", "/users/bob+tag@example.com"),
+    ("../messages/999", "/users/..%2Fmessages%2F999"),
+    ("x?y=1#z", "/users/x%3Fy%3D1%23z"),
+])
+def test_get_user_info_quotes_email(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch, email: str, url: str,
+) -> None:
+    calls: list[dict] = []
+    monkeypatch.setattr(client, "call_endpoint",
+                        lambda **kwargs: calls.append(kwargs) or {"result": "success"},
+                        raising=False)
+
+    assert core.get_user_info(email) is None
+    assert calls[0]["url"] == url
+
+
+@pytest.mark.parametrize("allowlist, expected", [
+    (None, ["general"]),
+    ("secret", ["general", "secret"]),
+    ("__ALL__", ["general", "ops", "secret"]),
+])
+def test_get_subscribed_streams_follows_allowlist(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
+    allowlist: Optional[str], expected: list[str],
+) -> None:
+    if allowlist is not None:
+        monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", allowlist)
+    subs = [{"name": "secret", "invite_only": True}, {"name": "general", "invite_only": False},
+            {"name": "ops", "invite_only": True}]
+    monkeypatch.setattr(client, "get_subscriptions",
+                        lambda: {"result": "success", "subscriptions": subs}, raising=False)
+
+    assert [s["name"] for s in core.get_subscribed_streams()] == expected
 
 
 def test_format_messages_dm_attribute() -> None:

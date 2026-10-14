@@ -20,6 +20,7 @@ from .core import (
     build_narrow,
     fetch_narrow,
     MessagePage,
+    ReadScopeError,
     send_message,
     add_reaction,
     remove_reaction,
