@@ -32,6 +32,33 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 
 4. Restart your MCP client. The Zulip tools should now be available.
 
+### Read as yourself, post as a bot
+
+A bot only sees the channels it is subscribed to and the DMs sent to it. To let an agent read everything you can see while it still posts as the bot, run two servers: one on the bot's zuliprc, and a read-only one on a zuliprc holding your personal [API key](https://zulip.com/api/api-keys).
+
+```json
+{
+  "mcpServers": {
+    "zulip": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "zulipmcp.mcp"],
+      "env": {"ZULIP_RC_PATH": "/path/to/bot.zuliprc"}
+    },
+    "zulip-personal": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "zulipmcp.mcp"],
+      "env": {
+        "ZULIP_RC_PATH": "/path/to/personal.zuliprc",
+        "ZULIPMCP_READ_ONLY": "1",
+        "BOT_ALLOWED_PRIVATE_STREAMS": "__ALL__"
+      }
+    }
+  }
+}
+```
+
+Read-only mode constrains this server, not an agent that can read the personal zuliprc file itself.
+
 ## Requirements
 
 - Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
@@ -204,7 +231,7 @@ The typing indicator starts on `set_context()` and after every `reply()`, and st
 
 ### Reading history and search
 
-`get_messages` reads a known conversation: a stream+topic, a DM via `dm_with=[emails]` (yourself is implied), or the conversation around a `message_id`, DMs included. `search_messages` uses Zulip's built-in keyword search over what the bot's account can see, filterable by `stream`, `topic`, `sender` and `dm_with`; results come newest first and are not ranked. Both tools accept ISO 8601 `after`/`before` bounds (naive values use `ZULIPMCP_TIMEZONE`). `after` works on any server, while `before` needs Zulip 12.0+ (feature level 445). Hits in private streams outside `BOT_ALLOWED_PRIVATE_STREAMS` are dropped even when the server returns them.
+`get_messages` reads one conversation: a stream+topic, a DM via `dm_with=[emails]` (yourself is implied), or the messages up to and including a `message_id`. `search_messages` uses Zulip's built-in keyword search, filterable by `stream`, `topic`, `sender` and `dm_with`. Its default `scope="received"` covers only messages this account received (subscribed channels since joining, plus DMs); `scope="public"` searches the full history of all public channels. Both tools return the most recent matches in chronological order, not ranked by relevance, and page back with `before_message_id`, which is exclusive; each response names the next value. Both accept ISO 8601 `after`/`before` bounds, with date-only and naive values in `ZULIPMCP_TIMEZONE`. `after` works on any server, while `before` needs Zulip 12.0+ (feature level 445). Hits in private streams outside `BOT_ALLOWED_PRIVATE_STREAMS` are dropped even when the server returns them, and DM history is readable only when it is `__ALL__`.
 
 ### Bot visibility filtering
 
@@ -219,7 +246,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | Variable | Description |
 |---|---|
 | `ZULIP_RC_PATH` | Absolute path to `.zuliprc` for direct MCP server or Hermes gateway use. Listener mode sets this for spawned sessions from `--zuliprc`; it does not read ambient `ZULIP_RC_PATH` as its own default. |
-| `ZULIPMCP_TIMEZONE` | IANA timezone used to display message timestamps, such as `Europe/London` or `Asia/Tokyo`. Defaults to `America/Los_Angeles`. |
+| `ZULIPMCP_TIMEZONE` | IANA timezone used to display message timestamps and to interpret date-only and naive `after`/`before` values, such as `Europe/London` or `Asia/Tokyo`. Defaults to `America/Los_Angeles`. |
 | `ZULIP_MAX_MESSAGE_LENGTH` | Char limit above which send tools return an error instead of letting Zulip silently truncate. Defaults to `10000` (Zulip's default); set for realms with a custom cap. |
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
@@ -227,7 +254,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
 | `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. `__ALL__` also permits reading DM history (`get_messages`/`search_messages`); otherwise those tools refuse DMs. |
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
-| `ZULIPMCP_READ_ONLY` | When `1` or `true`, the server cannot write to Zulip: write tools are hidden, session auto-init is skipped, and the client refuses every non-GET request at the HTTP layer -- for running on a personal API key without posting as that person. |
+| `ZULIPMCP_READ_ONLY` | When `1`/`true`/`yes`/`on`, the server cannot write to Zulip: the client refuses every non-GET request before sending it, write tools (including `set_context`, `reply` and `listen`) are hidden, and session auto-init is skipped. Unset or `0`/`false`/`no`/`off` = off; any other value is a startup error. See [Read as yourself, post as a bot](#read-as-yourself-post-as-a-bot). |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache base directory (defaults to system temp dir). Each site and account gets its own subdirectory, so servers running as different users never share cached data. |
 | `ZULIPMCP_LOG_DIR` | Override the log directory (defaults to `/tmp/zulipmcp_logs`). |
 | `ZULIPMCP_MARKDOWN_AUTOFIX` | Disables all outgoing markdown normalization (blank-line-before-table injection and bold/link rewrites) when set to `0` or `false`. Defaults to enabled. |
