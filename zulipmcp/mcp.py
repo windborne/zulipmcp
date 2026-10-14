@@ -904,10 +904,10 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                  message_id: Optional[int] = None,
                  dm_with: list[str] | None = None,
                  after: str = "", before: str = "") -> str:
-    """Get messages from a stream/topic or a DM, or the messages up to a message ID.
+    """Read one conversation: stream+topic or dm_with.
 
-    Target stream+topic or dm_with; message_id alone finds its conversation,
-    and with either one it ends the page at that ID.
+    message_id alone finds its conversation; the page ends at message_id
+    (inclusive) unless before_message_id is given.
 
     Args:
         stream: Stream/channel name (optional if message_id given).
@@ -916,8 +916,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         before_message_id: Only messages older than this ID (for pagination).
         message_id: Fetch messages up to and including this ID.
         dm_with: Emails of exactly the other DM participants (yourself is implied).
-        after: Only messages at or after this ISO 8601 date/datetime.
-        before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+).
+        after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
+        before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
     """
     if dm_with and (stream or topic):
         return "Error: Provide stream+topic or dm_with, not both."
@@ -988,9 +988,9 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
         dm_with: Only the DM conversation with exactly these emails.
-        scope: "received" = messages this account received (subscribed channels since joining, plus DMs); "public" = full history of all public channels.
-        after: Only messages at or after this ISO 8601 date/datetime.
-        before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+).
+        scope: "received" = messages this account received, or the full history of stream when one is given; "public" = full history of all public channels.
+        after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
+        before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
         num_messages: Max results (default 20, max 100).
         before_message_id: Only messages older than this ID (for paging).
     """
