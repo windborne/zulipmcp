@@ -1058,13 +1058,16 @@ def _parse_datetime(value: str) -> datetime:
 
 def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
                  dm_with: Optional[list[str]] = None, sender: Optional[str] = None,
-                 query: Optional[str] = None) -> list[dict]:
+                 query: Optional[str] = None, channels: Optional[str] = None) -> list[dict]:
     """Build a Zulip narrow from the given filters; empty filters are omitted.
 
     ``dm_with`` selects exactly that DM conversation (self is implied).
-    ``query`` is Zulip's server-side keyword search.
+    ``query`` is Zulip's server-side keyword search. ``channels="public"``
+    widens a search to the full history of every public channel.
     """
     narrow = []
+    if channels:
+        narrow.append({"operator": "channels", "operand": channels})
     if stream:
         narrow.append({"operator": "channel", "operand": stream})
     if topic:

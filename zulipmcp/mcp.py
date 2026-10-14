@@ -21,7 +21,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
@@ -963,18 +963,23 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
 @mcp.tool()
 def search_messages(query: str = "", stream: str = "", topic: str = "",
                     sender: str = "", dm_with: list[str] | None = None,
+                    scope: Literal["received", "public"] = "received",
                     after: str = "", before: str = "", num_messages: int = 20,
                     before_message_id: Optional[int] = None) -> str:
-    """Search with Zulip's built-in keyword search over what this account can
-    see, including DMs and private channels it can access. Returns the newest
-    matches first (not ranked by relevance); page back with before_message_id.
+    """Search messages with Zulip's built-in keyword search.
+
+    Returns the most recent matches, shown oldest to newest and not ranked
+    by relevance; page back with before_message_id. DM hits require
+    BOT_ALLOWED_PRIVATE_STREAMS=__ALL__; private-channel hits are limited to
+    BOT_ALLOWED_PRIVATE_STREAMS.
 
     Args:
-        query: Keywords for Zulip's full-text search.
+        query: Keywords; wrap words in double quotes to match a phrase.
         stream: Only this stream/channel.
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
         dm_with: Only the DM conversation with exactly these emails.
+        scope: "received" = messages this account received (subscribed channels since joining, plus DMs); "public" = full history of all public channels.
         after: Only messages at or after this ISO 8601 date/datetime.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+).
         num_messages: Max results (default 20, max 100).
@@ -986,6 +991,10 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         return "Error: topic requires stream."
     if dm_with and stream:
         return "Error: dm_with cannot be combined with stream/topic."
+    if scope == "public" and dm_with:
+        return "Error: scope='public' cannot be combined with dm_with."
+    if scope == "public" and stream:
+        return "Error: scope='public' is redundant with stream."
     if dm_with and not zulip_core.dm_reads_allowed():
         return DM_READS_ERROR
     if stream:
@@ -997,6 +1006,7 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         after_dt, before_dt = _parse_bounds(after, before)
         narrow = zulip_core.build_narrow(
             stream=stream, topic=topic, dm_with=dm_with, sender=sender, query=query,
+            channels="public" if scope == "public" else None,
         )
         page = zulip_core.fetch_narrow(
             narrow, num_messages=num_messages, before_message_id=before_message_id,

@@ -531,6 +531,31 @@ def test_search_validation(client: FakeClient, kwargs: dict, error: str) -> None
     assert client.requests == []
 
 
+def test_search_scope_received_adds_no_channel_operator(client: FakeClient) -> None:
+    search_messages(query="x")
+
+    assert client.requests[0]["narrow"] == [{"operator": "search", "operand": "x"}]
+
+
+def test_search_scope_public_searches_all_public_channels(client: FakeClient) -> None:
+    search_messages(query="x", sender=ALICE, scope="public")
+
+    assert client.requests[0]["narrow"] == [
+        {"operator": "channels", "operand": "public"},
+        {"operator": "sender", "operand": ALICE},
+        {"operator": "search", "operand": "x"},
+    ]
+
+
+@pytest.mark.parametrize("kwargs, error", [
+    ({"dm_with": [ALICE]}, "Error: scope='public' cannot be combined with dm_with."),
+    ({"stream": "general"}, "Error: scope='public' is redundant with stream."),
+])
+def test_search_scope_public_conflicts(dm_reads: FakeClient, kwargs: dict, error: str) -> None:
+    assert search_messages(query="x", scope="public", **kwargs) == error
+    assert dm_reads.requests == []
+
+
 def test_search_header_and_output(dm_reads: FakeClient) -> None:
     dm_reads.messages = [
         stream_msg(7, 100, content="deploy now"),
