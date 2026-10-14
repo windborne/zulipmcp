@@ -1079,16 +1079,56 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
     return narrow
 
 
-def _is_readable(msg: dict, skip_ignored: bool) -> bool:
-    """Whether a fetched message passes the DM, private-stream, and ignore rules."""
+def _is_readable(msg: dict) -> bool:
+    """Whether a fetched message passes the DM and private-stream rules."""
     if msg.get("type") == "private":
         return dm_reads_allowed()
     if msg.get("type") != "stream":
         return True
-    stream = msg.get("display_recipient", "")
-    if skip_ignored and stream.lower() in _ignored_streams:
-        return False
-    return is_private_stream_allowed(stream)
+    return is_private_stream_allowed(msg.get("display_recipient", ""))
+
+
+def _visible_streams() -> dict[str, bool]:
+    """Map each stream visible to the client to whether it is private. Cached for 1 hour.
+
+    Raises ValueError on API errors.
+    """
+    cache_key = ("visible_streams",)
+    cached = _get_cache().get(cache_key)
+    if cached is not None:
+        return cached
+    result = get_client().get_streams(include_public=True, include_subscribed=True)
+    if result.get("result") != "success":
+        raise ValueError(f"Zulip API error: {result.get('msg', 'unknown error')}")
+    streams = {s["name"]: s.get("invite_only", False) for s in result.get("streams", [])}
+    _get_cache().set(cache_key, streams, expire=3600)
+    return streams
+
+
+def _exclusion_terms(narrow: list[dict]) -> list[dict]:
+    """Negated narrow terms that keep unreadable and ignored messages off the server's page.
+
+    Dropping them client-side alone would still leak their IDs through the
+    paging cursor. Raises ValueError on API errors.
+    """
+    operators = {term.get("operator") for term in narrow}
+    names_channel = bool(operators & {"channel", "stream"})
+    names_channels = names_channel or bool(operators & {"channels", "streams"})
+    allowed = _allowed_private_streams()
+    terms = []
+    if not dm_reads_allowed():
+        # "private" rather than "dm": servers before Zulip 7.0 reject is:dm.
+        terms.append({"operator": "is", "operand": "private", "negated": True})
+    hide_private = not names_channels and _ALL_PRIVATE_STREAMS not in allowed
+    hide_ignored = not names_channel and bool(_ignored_streams)
+    if not (hide_private or hide_ignored):
+        return terms
+    # Only visible names: the server rejects a narrow naming an unknown stream.
+    for name, private in _visible_streams().items():
+        if ((hide_private and private and name.lower() not in allowed)
+                or (hide_ignored and name.lower() in _ignored_streams)):
+            terms.append({"operator": "stream", "operand": name, "negated": True})
+    return terms
 
 
 class MessagePage(NamedTuple):
@@ -1111,10 +1151,11 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
 
     The page ends just before ``before_message_id`` (exclusive) if given,
     else just before the ``before`` datetime, else at the newest message.
-    ``after`` is a client-side lower bound. DMs (unless
-    :func:`dm_reads_allowed`) and messages in private streams outside the
-    allowlist are dropped even when the server returns them, as are ignored
-    streams unless the narrow names a channel.
+    ``after`` is a client-side lower bound. The narrow is extended with
+    negated terms so the server never returns DMs (unless
+    :func:`dm_reads_allowed`), private streams outside the allowlist (unless
+    the narrow names a channel), or ignored streams (unless it names one
+    channel). Unreadable messages the server returns anyway are dropped.
 
     Raises ValueError on API errors, when ``after`` is not earlier than
     ``before``, or when ``before`` sets the anchor on a server older than
@@ -1125,7 +1166,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
     client = get_client()
     limit = max(min(num_messages, 100), 0)
     request: dict = {
-        "narrow": narrow,
+        "narrow": narrow + _exclusion_terms(narrow),
         "num_before": limit,
         "num_after": 0,
         "apply_markdown": False,
@@ -1172,8 +1213,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
     if oldest and not reached_after and (trimmed or not result.get("found_oldest", False)):
         older_than = oldest[0]["id"]
 
-    skip_ignored = not any(t.get("operator") in ("channel", "stream") for t in narrow)
-    return MessagePage([m for m in page if _is_readable(m, skip_ignored)], older_than, reached_after)
+    return MessagePage([m for m in page if _is_readable(m)], older_than, reached_after)
 
 
 def send_message(stream: str, topic: str, content: str) -> dict:
@@ -1465,7 +1505,7 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     # The server substitutes the nearest message when the ID doesn't exist.
     if msg.get("id") != message_id:
         return None
-    if not _is_readable(msg, skip_ignored=False):
+    if not _is_readable(msg):
         return None
     return msg
 

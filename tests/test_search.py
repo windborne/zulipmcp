@@ -15,6 +15,11 @@ search_messages = getattr(mcp.search_messages, "fn", mcp.search_messages)
 BOT = "bot@example.com"
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
+NO_DMS = {"operator": "is", "operand": "private", "negated": True}
+
+
+def not_stream(name: str) -> dict:
+    return {"operator": "stream", "operand": name, "negated": True}
 
 
 class DictCache:
@@ -42,6 +47,20 @@ def _dm_operand_error(narrow: list[dict]) -> Optional[str]:
     return None
 
 
+def _excluded(msg: dict, narrow: list[dict]) -> bool:
+    """Whether a negated narrow term excludes ``msg``, as the server would."""
+    for term in narrow:
+        if not term.get("negated"):
+            continue
+        if term["operator"] == "is" and term["operand"] in ("dm", "private"):
+            if msg["type"] == "private":
+                return True
+        elif term["operator"] in ("channel", "stream"):
+            if msg["type"] == "stream" and msg["display_recipient"].lower() == term["operand"].lower():
+                return True
+    return False
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.email = BOT
@@ -54,6 +73,8 @@ class FakeClient:
         ]
         self.requests: list[dict] = []
         self.response: Optional[dict] = None
+        self.honor_negation = True
+        self.stream_fetches = 0
 
     def get_messages(self, request: dict) -> dict:
         if request.get("num_before") == 0 and isinstance(request.get("anchor"), int):
@@ -65,7 +86,14 @@ class FakeClient:
             return {"result": "error", "msg": error}
         if self.response is not None:
             return self.response
+        narrow = request.get("narrow", [])
+        known = {s["name"].lower() for s in self.streams}
+        for term in narrow:
+            if term["operator"] in ("channel", "stream") and term["operand"].lower() not in known:
+                return {"result": "error", "msg": f"Invalid narrow operator: unknown channel {term['operand']}"}
         msgs = sorted(self.messages, key=lambda m: m["id"])
+        if self.honor_negation:
+            msgs = [m for m in msgs if not _excluded(m, narrow)]
         anchor = request.get("anchor")
         if anchor == "date":
             page, found_oldest = msgs, True
@@ -80,6 +108,7 @@ class FakeClient:
                 "found_oldest": found_oldest}
 
     def get_streams(self, **_kwargs: Any) -> dict:
+        self.stream_fetches += 1
         return {"result": "success", "streams": self.streams}
 
 
@@ -166,7 +195,7 @@ def test_search_passes_narrow_to_server(client: FakeClient) -> None:
 
     assert client.requests[0]["narrow"] == core.build_narrow(
         stream="general", topic="t", sender=ALICE, query="x",
-    )
+    ) + [NO_DMS]
 
 
 # --- anchors -----------------------------------------------------------------
@@ -272,7 +301,8 @@ def test_older_than_pages_back_until_oldest(client: FakeClient) -> None:
     assert client.requests[1]["include_anchor"] is False
 
 
-def test_older_than_counts_filtered_messages(client: FakeClient) -> None:
+def test_older_than_counts_messages_dropped_client_side(client: FakeClient) -> None:
+    client.honor_negation = False
     client.messages = [stream_msg(1), stream_msg(2, stream="secret"), stream_msg(3)]
 
     page = core.fetch_narrow([], num_messages=2)
@@ -350,6 +380,90 @@ def test_ignored_stream_reads_when_named(client: FakeClient, monkeypatch: pytest
     assert [m["id"] for m in core.get_topic_messages("noise", "t")] == [2]
 
 
+@pytest.mark.parametrize("allowlist, expected", [
+    (None, [NO_DMS, not_stream("secret")]),
+    ("other", [NO_DMS, not_stream("secret")]),
+    ("secret", [NO_DMS]),
+    ("__ALL__", []),
+])
+def test_exclusion_terms_follow_allowlist(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
+    allowlist: Optional[str], expected: list[dict],
+) -> None:
+    if allowlist is not None:
+        monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", allowlist)
+
+    core.fetch_narrow([])
+
+    assert client.requests[0]["narrow"] == expected
+
+
+def test_exclusion_terms_skip_private_streams_when_channels_named(client: FakeClient) -> None:
+    core.fetch_narrow(core.build_narrow(stream="general"))
+    core.fetch_narrow(core.build_narrow(channels="public"))
+    core.fetch_narrow([{"operator": "streams", "operand": "public"}])
+
+    assert [r["narrow"][-1] for r in client.requests] == [NO_DMS] * 3
+
+
+def test_exclusion_terms_hide_ignored_streams(
+    dm_reads: FakeClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_ignored_streams", {"noise", "deleted"})
+
+    core.fetch_narrow([])
+    core.fetch_narrow(core.build_narrow(channels="public"))
+    core.fetch_narrow(core.build_narrow(stream="noise"))
+
+    assert [r["narrow"] for r in dm_reads.requests] == [
+        [not_stream("noise")],
+        [{"operator": "channels", "operand": "public"}, not_stream("noise")],
+        core.build_narrow(stream="noise"),
+    ]
+
+
+def test_exclusion_terms_keep_dm_narrow_with_allow_all(dm_reads: FakeClient) -> None:
+    get_messages(dm_with=[ALICE])
+
+    assert dm_reads.requests[0]["narrow"] == [{"operator": "dm", "operand": ALICE}]
+
+
+def test_exclusion_terms_hide_dms_even_in_dm_narrow(client: FakeClient) -> None:
+    client.messages = [dm_msg(9001, [ALICE, BOT])]
+
+    page = core.fetch_narrow(core.build_narrow(dm_with=[ALICE]))
+
+    assert NO_DMS in client.requests[0]["narrow"]
+    assert page == core.MessagePage([], None, False)
+
+
+def test_stream_list_is_fetched_once(client: FakeClient) -> None:
+    core.fetch_narrow([])
+    core.fetch_narrow([])
+
+    assert client.stream_fetches == 1
+
+
+def test_stream_list_error_fails_closed(client: FakeClient) -> None:
+    client.get_streams = lambda **_kwargs: {"result": "error", "msg": "boom"}
+
+    with pytest.raises(ValueError, match="boom"):
+        core.fetch_narrow([])
+    assert client.requests == []
+
+
+@pytest.mark.parametrize("num_messages", [0, 1, 20])
+def test_hidden_message_ids_never_surface(client: FakeClient, num_messages: int) -> None:
+    client.messages = [stream_msg(9001, stream="secret", content="hidden"),
+                       dm_msg(9002, [ALICE, BOT], content="hidden")]
+
+    page = core.fetch_narrow([], num_messages=num_messages)
+    out = search_messages(query="x", num_messages=num_messages)
+
+    assert page == core.MessagePage([], None, False)
+    assert "900" not in out and "hidden" not in out
+
+
 def test_search_rejects_disallowed_private_stream(client: FakeClient) -> None:
     assert search_messages(query="x", stream="secret") == mcp.PRIVATE_STREAM_ERROR
     assert client.requests == []
@@ -404,7 +518,7 @@ def test_get_messages_before_message_id_is_exclusive(client: FakeClient) -> None
     out = get_messages(stream="general", topic="t", before_message_id=4, num_messages=2)
 
     request = client.requests[0]
-    assert request["narrow"] == core.build_narrow(stream="general", topic="t")
+    assert request["narrow"] == core.build_narrow(stream="general", topic="t") + [NO_DMS]
     assert (request["anchor"], request["include_anchor"]) == (4, False)
     assert out.startswith("Messages from [public] #general > t:\n(Older: before_message_id=2)")
     assert 'id="3"' in out and 'id="4"' not in out
@@ -442,7 +556,7 @@ def test_get_topic_messages_is_inclusive(client: FakeClient) -> None:
     msgs = core.get_topic_messages("general", "t", num_messages=2, before_message_id=4)
 
     assert [m["id"] for m in msgs] == [3, 4]
-    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t")
+    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t") + [NO_DMS]
     assert (client.requests[0]["anchor"], client.requests[0]["include_anchor"]) == (5, False)
     assert [m["id"] for m in core.get_topic_messages("general", "t")] == [1, 2, 3, 4, 5]
 
@@ -461,7 +575,7 @@ def test_get_messages_stream_with_after(client: FakeClient) -> None:
 
     out = get_messages(stream="general", topic="t", after="1970-01-01T00:02:00")
 
-    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t")
+    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t") + [NO_DMS]
     assert 'id="2"' in out and 'id="1"' not in out
     assert "Reached after=1970-01-01T00:02:00" in out
 
@@ -552,10 +666,10 @@ def test_search_validation(client: FakeClient, kwargs: dict, error: str) -> None
     assert client.requests == []
 
 
-def test_search_scope_received_adds_no_channel_operator(client: FakeClient) -> None:
+def test_search_scope_received_adds_no_channel_operator(dm_reads: FakeClient) -> None:
     search_messages(query="x")
 
-    assert client.requests[0]["narrow"] == [{"operator": "search", "operand": "x"}]
+    assert dm_reads.requests[0]["narrow"] == [{"operator": "search", "operand": "x"}]
 
 
 def test_search_scope_public_searches_all_public_channels(client: FakeClient) -> None:
@@ -565,6 +679,7 @@ def test_search_scope_public_searches_all_public_channels(client: FakeClient) ->
         {"operator": "channels", "operand": "public"},
         {"operator": "sender", "operand": ALICE},
         {"operator": "search", "operand": "x"},
+        NO_DMS,
     ]
 
 
