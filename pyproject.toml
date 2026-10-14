@@ -23,8 +23,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "diskcache",
-    "fastmcp>=3.0",
+    "diskcache>=5",
+    "fastmcp>=3.0,<5",
     "tzdata; sys_platform == 'win32'",
     "zulip>=0.8.2",
 ]
