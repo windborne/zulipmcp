@@ -250,10 +250,10 @@ def is_private_stream_allowed(stream_name: str) -> bool:
 
 
 def dm_reads_allowed() -> bool:
-    """Whether DM history may be read: only when every private stream is allowed.
+    """Whether DM history may be read: only under ``BOT_ALLOWED_PRIVATE_STREAMS=__ALL__``.
 
-    A shared bot's DMs belong to many users, so they get the strictest
-    private-stream setting rather than a separate switch.
+    An explicit stream list never unlocks DMs, which on a shared bot belong
+    to every user who has messaged it.
     """
     return _ALL_PRIVATE_STREAMS in _allowed_private_streams()
 
@@ -470,11 +470,7 @@ class _ReadOnlyAdapter(HTTPAdapter):
 
 
 class _ReadOnlyClient(zulip.Client):
-    """Client whose HTTP session refuses every non-GET request.
-
-    The guard sits on the session's transport adapters, so it covers both
-    API calls and direct ``client.session`` use.
-    """
+    """Client whose session's transport adapters refuse every non-GET request."""
 
     def ensure_session(self) -> None:
         if self.session:

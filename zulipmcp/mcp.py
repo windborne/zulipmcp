@@ -892,11 +892,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                  after: str = "", before: str = "") -> str:
     """Get messages from a stream/topic or a DM, or the messages up to a message ID.
 
-    Accepts one of stream+topic, dm_with, or message_id:
-    - stream+topic: fetch messages from that topic (with optional pagination)
-    - dm_with: fetch the DM conversation with exactly these people
-    - message_id: auto-discover the conversation, fetch messages up to and including it
-    - message_id with stream+topic or dm_with: end the page at message_id
+    Target stream+topic or dm_with; message_id alone finds its conversation,
+    and with either one it ends the page at that ID.
 
     Args:
         stream: Stream/channel name (optional if message_id given).
@@ -904,7 +901,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         num_messages: Number of messages (default 20, max 100).
         before_message_id: Only messages older than this ID (for pagination).
         message_id: Fetch messages up to and including this ID.
-        dm_with: Emails of the other DM participants (yourself is implied).
+        dm_with: Emails of exactly the other DM participants (yourself is implied).
         after: Only messages at or after this ISO 8601 date/datetime.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+).
     """
@@ -969,9 +966,9 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
     """Search messages with Zulip's built-in keyword search.
 
     Returns the most recent matches, shown oldest to newest and not ranked
-    by relevance; page back with before_message_id. DM hits require
-    BOT_ALLOWED_PRIVATE_STREAMS=__ALL__; private-channel hits are limited to
-    BOT_ALLOWED_PRIVATE_STREAMS.
+    by relevance; page back with before_message_id. DMs appear only with
+    BOT_ALLOWED_PRIVATE_STREAMS=__ALL__, private channels only if allowlisted;
+    others are dropped silently.
 
     Args:
         query: Keywords; wrap words in double quotes to match a phrase.
