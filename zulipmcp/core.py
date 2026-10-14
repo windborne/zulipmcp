@@ -1061,11 +1061,13 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
     ``query`` is Zulip's server-side keyword search. ``channels="public"``
     widens a search to the full history of every public channel.
     """
+    # "stream"/"streams" rather than "channel"/"channels": servers before
+    # Zulip 9.0 reject the newer names.
     narrow = []
     if channels:
-        narrow.append({"operator": "channels", "operand": channels})
+        narrow.append({"operator": "streams", "operand": channels})
     if stream:
-        narrow.append({"operator": "channel", "operand": stream})
+        narrow.append({"operator": "stream", "operand": stream})
     if topic:
         narrow.append({"operator": "topic", "operand": topic})
     if dm_with:

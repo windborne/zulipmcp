@@ -160,12 +160,12 @@ def utc(*args: int) -> datetime:
 
 @pytest.mark.parametrize("kwargs, expected", [
     ({"stream": "general", "topic": "t"},
-     [{"operator": "channel", "operand": "general"}, {"operator": "topic", "operand": "t"}]),
+     [{"operator": "stream", "operand": "general"}, {"operator": "topic", "operand": "t"}]),
     ({"dm_with": [ALICE, BOB]}, [{"operator": "dm", "operand": f"{ALICE},{BOB}"}]),
     ({"sender": ALICE}, [{"operator": "sender", "operand": ALICE}]),
     ({"query": "deploy plan"}, [{"operator": "search", "operand": "deploy plan"}]),
     ({"stream": "general", "sender": ALICE, "query": "x"},
-     [{"operator": "channel", "operand": "general"},
+     [{"operator": "stream", "operand": "general"},
       {"operator": "sender", "operand": ALICE},
       {"operator": "search", "operand": "x"}]),
     ({"dm_with": [ALICE], "query": "x"},
@@ -401,9 +401,10 @@ def test_exclusion_terms_follow_allowlist(
 def test_exclusion_terms_skip_private_streams_when_channels_named(client: FakeClient) -> None:
     core.fetch_narrow(core.build_narrow(stream="general"))
     core.fetch_narrow(core.build_narrow(channels="public"))
-    core.fetch_narrow([{"operator": "streams", "operand": "public"}])
+    core.fetch_narrow([{"operator": "channel", "operand": "general"}])
+    core.fetch_narrow([{"operator": "channels", "operand": "public"}])
 
-    assert [r["narrow"][-1] for r in client.requests] == [NO_DMS] * 3
+    assert [r["narrow"][-1] for r in client.requests] == [NO_DMS] * 4
 
 
 def test_exclusion_terms_hide_ignored_streams(
@@ -417,7 +418,7 @@ def test_exclusion_terms_hide_ignored_streams(
 
     assert [r["narrow"] for r in dm_reads.requests] == [
         [not_stream("noise")],
-        [{"operator": "channels", "operand": "public"}, not_stream("noise")],
+        [{"operator": "streams", "operand": "public"}, not_stream("noise")],
         core.build_narrow(stream="noise"),
     ]
 
@@ -676,7 +677,7 @@ def test_search_scope_public_searches_all_public_channels(client: FakeClient) ->
     search_messages(query="x", sender=ALICE, scope="public")
 
     assert client.requests[0]["narrow"] == [
-        {"operator": "channels", "operand": "public"},
+        {"operator": "streams", "operand": "public"},
         {"operator": "sender", "operand": ALICE},
         {"operator": "search", "operand": "x"},
         NO_DMS,
