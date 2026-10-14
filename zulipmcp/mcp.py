@@ -700,7 +700,7 @@ def _after_reply_typing() -> None:
 
 
 def _stop_typing_safe():
-    """Stop typing indicator, ignoring errors. Deliberately not gated by auto_typing_start — see CLAUDE.md."""
+    """Stop typing indicator, ignoring errors. Deliberately not gated by auto_typing_start — see AGENTS.md."""
     if _session.active and _session.stream and _session.topic:
         try:
             zulip_core.send_typing(_session.stream, _session.topic, "stop")
