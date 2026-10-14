@@ -223,7 +223,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
 | `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. |
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
-| `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
+| `ZULIPMCP_CACHE_DIR` | Override the disk cache base directory (defaults to system temp dir). Each site and account gets its own subdirectory, so servers running as different users never share cached data. |
 | `ZULIPMCP_LOG_DIR` | Override the log directory (defaults to `/tmp/zulipmcp_logs`). |
 | `ZULIPMCP_MARKDOWN_AUTOFIX` | Disables all outgoing markdown normalization (blank-line-before-table injection and bold/link rewrites) when set to `0` or `false`. Defaults to enabled. |
 

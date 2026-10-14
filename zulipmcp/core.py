@@ -1,3 +1,5 @@
+import functools
+import hashlib
 import os
 import re
 import time
@@ -30,8 +32,6 @@ def _load_timezone() -> ZoneInfo:
 TIMEZONE = _load_timezone()
 
 _client: Optional[zulip.Client] = None
-_cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
-    Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
 _dismiss_emoji: set[str] = {"stop_sign"}
@@ -392,7 +392,7 @@ def check_dismissed(message_id: int, bot_user_id: int) -> Optional[str]:
 def is_stream_private(stream_name: str) -> bool:
     """Check if a stream is private (invite_only). Cached for 1 hour."""
     cache_key = ("is_stream_private", stream_name.lower())
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     if cached is not None:
         return cached
 
@@ -403,11 +403,29 @@ def is_stream_private(stream_name: str) -> bool:
 
     for s in result.get("streams", []):
         is_private = s.get("invite_only", False)
-        _cache.set(("is_stream_private", s["name"].lower()), is_private, expire=3600)
+        _get_cache().set(("is_stream_private", s["name"].lower()), is_private, expire=3600)
 
     # Re-check cache after populating
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     return cached if cached is not None else True  # not in results — must be private
+
+
+@functools.cache
+def _open_cache(identity: str) -> diskcache.Cache:
+    base = os.environ.get("ZULIPMCP_CACHE_DIR",
+                          Path(tempfile.gettempdir()) / "zulipmcp_cache")
+    return diskcache.Cache(Path(base) / identity)
+
+
+def _get_cache() -> diskcache.Cache:
+    """Disk cache scoped to the current client's site and account.
+
+    Cache keys carry no identity, so processes authenticated as different
+    users must not share a directory.
+    """
+    client = get_client()
+    identity = hashlib.sha256(f"{client.base_url}|{client.email}".encode()).hexdigest()[:16]
+    return _open_cache(identity)
 
 
 def get_client() -> zulip.Client:
@@ -554,7 +572,7 @@ def get_messages(hours_back: int = 24, channels: Optional[list[str]] = None,
     """
     cache_key = ("get_messages", hours_back, tuple(channels) if channels else None,
                  sender, as_of.isoformat() if as_of else None)
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     if cached is not None:
         return cached
 
@@ -587,11 +605,11 @@ def get_messages(hours_back: int = 24, channels: Optional[list[str]] = None,
                 seen.add(m["id"])
                 unique.append(m)
         unique.sort(key=lambda m: m["id"])
-        _cache.set(cache_key, unique, expire=600)
+        _get_cache().set(cache_key, unique, expire=600)
         return unique
     else:
         result = _paginated_fetch(client, narrow, cutoff, anchor_time)
-        _cache.set(cache_key, result, expire=600)
+        _get_cache().set(cache_key, result, expire=600)
         return result
 
 
@@ -599,7 +617,7 @@ def _paginated_fetch(client: zulip.Client, narrow: list[dict],
                      cutoff: int, upper_bound: Optional[int] = None) -> list[dict]:
     """Paginate backward from newest in batches of 500 until time cutoff."""
     cache_key = ("_paginated_fetch", tuple(tuple(d.items()) for d in narrow), cutoff, upper_bound)
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     if cached is not None:
         return cached
 
@@ -643,7 +661,7 @@ def _paginated_fetch(client: zulip.Client, narrow: list[dict],
             m for m in all_messages
             if m.get("display_recipient", "").lower() not in _ignored_streams
         ]
-    _cache.set(cache_key, all_messages, expire=600)
+    _get_cache().set(cache_key, all_messages, expire=600)
     return all_messages
 
 
@@ -1073,7 +1091,7 @@ def send_typing(stream: str, topic: str, op: str = "start") -> dict:
     Returns API result dict.
     """
     client = get_client()
-    stream_id = _stream_id_cache.get(stream)
+    stream_id = _stream_id_get_cache().get(stream)
     if stream_id is None:
         stream_result = client.get_stream_id(stream)
         if stream_result["result"] != "success":
@@ -1199,14 +1217,14 @@ def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
 def get_custom_profile_fields() -> list[dict]:
     """Get the org's custom profile field definitions. Cached aggressively."""
     cache_key = ("custom_profile_fields",)
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     if cached is not None:
         return cached
     result = get_client().call_endpoint(url="/realm/profile_fields", method="GET")
     if result.get("result") != "success":
         return []
     fields = result.get("custom_fields", [])
-    _cache.set(cache_key, fields, expire=3600)
+    _get_cache().set(cache_key, fields, expire=3600)
     return fields
 
 
