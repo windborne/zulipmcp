@@ -34,6 +34,7 @@ READ_TOOLS = {
     "list_emoji",
     "list_streams",
     "resolve_name",
+    "search_messages",
     "verify_message",
 }
 

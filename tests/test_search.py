@@ -58,7 +58,8 @@ class FakeClient:
 def client(monkeypatch: pytest.MonkeyPatch) -> FakeClient:
     fake = FakeClient()
     monkeypatch.setattr(core, "get_client", lambda: fake)
-    monkeypatch.setattr(core, "_cache", DictCache())
+    cache = DictCache()
+    monkeypatch.setattr(core, "_get_cache", lambda: cache)
     monkeypatch.setattr(core, "_ignored_streams", set())
     monkeypatch.setattr(core, "TIMEZONE", ZoneInfo("UTC"))
     monkeypatch.delenv("BOT_ALLOWED_PRIVATE_STREAMS", raising=False)
