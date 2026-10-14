@@ -2,6 +2,8 @@ from .mcp import configure, mcp
 
 from .core import (
     normalize_zulip_markdown,
+    ReadOnlyError,
+    is_read_only,
     get_client,
     get_user_email,
     resolve_name,
