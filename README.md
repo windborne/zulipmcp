@@ -202,6 +202,10 @@ Users can dismiss a bot session by reacting with a configurable emoji (default: 
 
 The typing indicator starts on `set_context()` and after every `reply()`, and stops on `listen()` and `end_session()`, so users see the bot as "typing" while it works. If another process drives the indicator, `configure(auto_typing_start=False)` suppresses the automatic starts so they cannot overwrite it; the stops still run, since clearing the indicator on idle and exit is right whoever set it, and `reply()` sends a stop in place of its start so the status shown while composing does not outlive the message. The explicit `typing()` / `stop_typing()` tools are unaffected.
 
+### Reading history and search
+
+`get_messages` reads a known conversation: a stream+topic, a DM via `dm_with=[emails]` (yourself is implied), or the conversation around a `message_id`, DMs included. `search_messages` uses Zulip's built-in keyword search over what the bot's account can see, filterable by `stream`, `topic`, `sender` and `dm_with`; results come newest first and are not ranked. Both tools accept ISO 8601 `after`/`before` bounds (naive values use `ZULIPMCP_TIMEZONE`). `after` works on any server, while `before` needs Zulip 12.0+ (feature level 445). Hits in private streams outside `BOT_ALLOWED_PRIVATE_STREAMS` are dropped even when the server returns them.
+
 ### Bot visibility filtering
 
 Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages starting with `/nobots` or `/nb` are also filtered out. This lets humans have private conversations the bot won't see.

@@ -7,7 +7,7 @@ import tempfile
 import json
 import urllib.parse
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import IO, Any, Callable, Dict, List, Mapping, Optional
 
@@ -705,7 +705,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
 
     combine=True merges consecutive messages from same user within 2 min.
     Smart timestamps: date shown only when it changes, time shown on 5+ min gaps.
-    include_topic=True adds stream and topic attributes to each <msg> tag.
+    include_topic=True adds stream and topic attributes to each <msg> tag, or
+    a dm attribute listing participant emails for DMs.
 
     Note: Messages in /nobots or /nb topics or starting with /nobots or /nb are automatically
     filtered out and will not be shown to the bot.
@@ -741,6 +742,9 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'stream="{stream_name}"')
             attrs.append(f'visibility="{visibility}"')
             attrs.append(f'topic="{msg.get("subject", "")}"')
+        elif include_topic and msg.get("type") == "private":
+            emails = ", ".join(r.get("email", "") for r in msg.get("display_recipient", []))
+            attrs.append(f'dm="{emails}"')
         attrs.append(f'id="{msg_id}"')
 
         # Add reaction summary as attribute if present
@@ -1002,6 +1006,133 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
         msgs = [m for m in msgs if m.get("sender_id") != exclude_user_id]
     msgs.sort(key=lambda m: m["id"])
     return msgs
+
+
+DATE_ANCHOR_FEATURE_LEVEL = 445
+
+
+def parse_datetime(value: str) -> datetime:
+    """Parse an ISO 8601 date or datetime into an aware datetime.
+
+    Date-only and naive values are interpreted in ``TIMEZONE``.
+    """
+    text = value.strip()
+    try:
+        if len(text) == 10:
+            parsed = datetime.combine(date.fromisoformat(text), datetime.min.time())
+        else:
+            if text[-1:] in ("Z", "z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"Invalid date {value!r}; use ISO 8601 such as 2025-03-01 or 2025-03-01T14:30"
+        ) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TIMEZONE)
+    return parsed
+
+
+def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
+                 dm_with: Optional[list[str]] = None, sender: Optional[str] = None,
+                 query: Optional[str] = None) -> list[dict]:
+    """Build a Zulip narrow from the given filters; empty filters are omitted.
+
+    ``dm_with`` selects exactly that DM conversation (self is implied).
+    ``query`` is Zulip's server-side keyword search.
+    """
+    narrow = []
+    if stream:
+        narrow.append({"operator": "channel", "operand": stream})
+    if topic:
+        narrow.append({"operator": "topic", "operand": topic})
+    if dm_with:
+        narrow.append({"operator": "dm", "operand": list(dm_with)})
+    if sender:
+        narrow.append({"operator": "sender", "operand": sender})
+    if query:
+        narrow.append({"operator": "search", "operand": query})
+    return narrow
+
+
+def _is_readable(msg: dict) -> bool:
+    """Whether a fetched message passes the private-stream allowlist and ignore list."""
+    if msg.get("type") != "stream":
+        return True
+    stream = msg.get("display_recipient", "")
+    if stream.lower() in _ignored_streams:
+        return False
+    return is_private_stream_allowed(stream)
+
+
+def fetch_narrow(narrow: list[dict], num_messages: int = 20,
+                 before_message_id: Optional[int] = None,
+                 after: Optional[datetime] = None,
+                 before: Optional[datetime] = None) -> tuple[list[dict], bool]:
+    """Fetch one page of messages matching a narrow, paging backward.
+
+    The page ends just before ``before_message_id`` if given, else just
+    before the ``before`` datetime, else at the newest message. ``after`` is
+    a client-side lower bound. Messages in private streams outside the
+    allowlist, or in ignored streams, are dropped even when the server
+    returns them.
+
+    Returns (messages sorted by ID, whether the ``after`` bound cut the page).
+    Raises ValueError on API errors, or when ``before`` sets the anchor on a
+    server older than Zulip 12.0.
+    """
+    client = get_client()
+    limit = min(num_messages, 100)
+    request: dict = {
+        "narrow": narrow,
+        "num_before": limit,
+        "num_after": 0,
+        "apply_markdown": False,
+    }
+    if before_message_id is not None:
+        request["anchor"] = before_message_id
+        request["include_anchor"] = False
+    elif before is not None:
+        if client.feature_level < DATE_ANCHOR_FEATURE_LEVEL:
+            raise ValueError(
+                f"before= requires Zulip 12.0+ (feature level {DATE_ANCHOR_FEATURE_LEVEL}); "
+                f"this server is at feature level {client.feature_level}"
+            )
+        request["anchor"] = "date"
+        request["anchor_date"] = before.astimezone(timezone.utc).isoformat()
+        # When nothing is on or after the date the server anchors on the
+        # newest message, which is in range and must be kept. In the normal
+        # case the timestamp filter below drops the anchor.
+        request["include_anchor"] = True
+    else:
+        request["anchor"] = "newest"
+
+    result = client.get_messages(request)
+    if result.get("result") != "success":
+        raise ValueError(f"Zulip API error: {result.get('msg', 'unknown error')}")
+    msgs = sorted(result.get("messages", []), key=lambda m: m["id"])
+
+    if before is not None:
+        cutoff = before.timestamp()
+        msgs = [m for m in msgs if m.get("timestamp", 0) < cutoff]
+    msgs = msgs[-limit:] if limit > 0 else []
+
+    after_reached = False
+    if after is not None:
+        floor = after.timestamp()
+        in_range = [m for m in msgs if m.get("timestamp", 0) >= floor]
+        after_reached = len(in_range) < len(msgs)
+        msgs = in_range
+
+    return [m for m in msgs if _is_readable(m)], after_reached
+
+
+def dm_partner_emails(msg: dict) -> list[str]:
+    """Emails of a DM's other participants, or just self for a self-DM."""
+    me = (get_client().email or "").lower()
+    emails = [r["email"] for r in msg.get("display_recipient", []) if r.get("email")]
+    others = [e for e in emails if e.lower() != me]
+    return others or emails
 
 
 def send_message(stream: str, topic: str, content: str) -> dict:
