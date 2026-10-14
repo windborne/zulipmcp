@@ -1066,20 +1066,22 @@ def _is_readable(msg: dict) -> bool:
     return is_private_stream_allowed(msg.get("display_recipient", ""))
 
 
+_VISIBLE_STREAMS_KEY = ("visible_streams",)
+
+
 def _visible_streams() -> dict[str, bool]:
     """Map each stream visible to the client to whether it is private. Cached for 1 hour.
 
     Raises ValueError on API errors.
     """
-    cache_key = ("visible_streams",)
-    cached = _get_cache().get(cache_key)
+    cached = _get_cache().get(_VISIBLE_STREAMS_KEY)
     if cached is not None:
         return cached
     result = get_client().get_streams(include_public=True, include_subscribed=True)
     if result.get("result") != "success":
         raise ValueError(f"Zulip API error: {result.get('msg', 'unknown error')}")
     streams = {s["name"]: s.get("invite_only", False) for s in result.get("streams", [])}
-    _get_cache().set(cache_key, streams, expire=3600)
+    _get_cache().set(_VISIBLE_STREAMS_KEY, streams, expire=3600)
     return streams
 
 
@@ -1141,8 +1143,9 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
         raise ValueError("after must be earlier than before")
     client = get_client()
     limit = min(max(num_messages, 1), 100)
+    exclusions = _exclusion_terms(narrow)
     request: dict = {
-        "narrow": narrow + _exclusion_terms(narrow),
+        "narrow": narrow + exclusions,
         "num_before": limit,
         "num_after": 0,
         "apply_markdown": False,
@@ -1166,6 +1169,11 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
         request["anchor"] = "newest"
 
     result = client.get_messages(request)
+    if result.get("result") != "success" and any(t["operator"] == "stream" for t in exclusions):
+        # The server rejects a narrow naming a stream deleted or renamed since
+        # the stream list was cached; refresh it and retry once.
+        _get_cache().delete(_VISIBLE_STREAMS_KEY)
+        result = client.get_messages({**request, "narrow": narrow + _exclusion_terms(narrow)})
     if result.get("result") != "success":
         raise ValueError(f"Zulip API error: {result.get('msg', 'unknown error')}")
     raw = sorted(result.get("messages", []), key=lambda m: m["id"])

@@ -32,6 +32,9 @@ class DictCache:
     def set(self, key: Any, value: Any, expire: Optional[int] = None) -> None:
         self.data[key] = value
 
+    def delete(self, key: Any) -> None:
+        self.data.pop(key, None)
+
 
 def _dm_operand_error(narrow: list[dict]) -> Optional[str]:
     """Mirror the server's check_string_or_int_list validation of ``dm``."""
@@ -760,3 +763,16 @@ def test_format_messages_dm_attribute() -> None:
     assert f'dm="{ALICE}, {BOT}"' in out
     assert "stream=" not in out
     assert "dm=" not in core.format_messages([dm_msg(1, [ALICE, BOT])])
+
+
+def test_stale_stream_list_is_refreshed_once(client: FakeClient) -> None:
+    client.streams.append({"name": "gone", "invite_only": True})
+    client.messages = [stream_msg(1)]
+    core.fetch_narrow(core.build_narrow(query="hi"))
+    client.streams.pop()  # deleted after the stream list was cached
+
+    page = core.fetch_narrow(core.build_narrow(query="hi"))
+
+    assert [m["id"] for m in page.messages] == [1]
+    assert any(t.get("operand") == "gone" for t in client.requests[-2]["narrow"])
+    assert not any(t.get("operand") == "gone" for t in client.requests[-1]["narrow"])
