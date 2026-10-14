@@ -1101,8 +1101,11 @@ def _channel_operands(narrow: list[dict]) -> list[str]:
 def _check_read_scope(narrow: list[dict]) -> None:
     """Raise ReadScopeError unless the narrow names a scope this process may read.
 
-    Don't subtract hidden scopes with negated terms instead: narrows travel
-    in the GET query string, which breaks past a few dozen terms.
+    Under ``__ALL__`` the server decides. Otherwise the narrow must name
+    allowed channels (by name) or public channels, and must not select DMs
+    or use ``with``. Don't subtract hidden scopes with negated terms
+    instead: narrows travel in the GET query string, which breaks past a
+    few dozen terms.
     """
     if dm_reads_allowed():
         return
@@ -1153,20 +1156,17 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
                  before: Optional[datetime] = None) -> MessagePage:
     """Fetch one page of messages matching a narrow, paging backward.
 
-    The page ends just before ``before_message_id`` (exclusive) if given,
-    else just before the ``before`` datetime, else at the newest message.
-    ``after`` is a client-side lower bound. Naive bounds are in ``TIMEZONE``,
-    and both widen to whole seconds to match Zulip's integer timestamps.
-    The narrow is sent as given. Unreadable messages the server returns
-    anyway are dropped, as are ignored streams unless the narrow names a
-    channel; the paging cursor still counts them.
+    The page ends just before ``before_message_id`` (exclusive), else just
+    before ``before``, else at the newest message; ``after`` is a
+    client-side lower bound. Naive bounds are in ``TIMEZONE``; both widen to
+    whole seconds, since Zulip timestamps are integers. Unreadable messages,
+    and ignored streams unless the narrow names a channel, are dropped after
+    the paging cursor is taken.
 
-    Raises ReadScopeError before fetching when the narrow names no readable
-    scope: without ``BOT_ALLOWED_PRIVATE_STREAMS=__ALL__`` it must not
-    select DMs and must name an allowed channel (names only) or public
-    channels. Raises ValueError on API errors, when ``after`` is not
-    earlier than ``before``, or when ``before`` sets the anchor on a server
-    older than Zulip 12.0.
+    Raises ReadScopeError before fetching (see :func:`_check_read_scope`).
+    Raises ValueError on API errors, when ``after`` is not earlier than
+    ``before``, or when ``before`` is the anchor (no ``before_message_id``)
+    on a server older than Zulip 12.0.
     """
     _check_read_scope(narrow)
     if after is not None and after.tzinfo is None:
