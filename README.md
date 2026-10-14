@@ -88,9 +88,9 @@ zulipmcp can also be imported directly as a Python library:
 ```python
 import zulipmcp
 
-# Fetch and format recent messages
-messages = zulipmcp.get_messages(hours_back=24, channels=["engineering"])
-print(zulipmcp.format_messages(messages))
+# Fetch and format the latest page of a channel
+page = zulipmcp.fetch_narrow(zulipmcp.build_narrow(stream="engineering"))
+print(zulipmcp.format_messages(page.messages))
 
 # Send a message
 zulipmcp.send_message("engineering", "general", "Hello from Python!")
