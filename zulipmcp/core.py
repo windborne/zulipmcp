@@ -1037,13 +1037,11 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
     ``query`` is Zulip's server-side keyword search. ``channels="public"``
     widens a search to the full history of every public channel.
     """
-    # "stream"/"streams" rather than "channel"/"channels": servers before
-    # Zulip 9.0 reject the newer names.
     narrow = []
     if channels:
-        narrow.append({"operator": "streams", "operand": channels})
+        narrow.append({"operator": "channels", "operand": channels})
     if stream:
-        narrow.append({"operator": "stream", "operand": stream})
+        narrow.append({"operator": "channel", "operand": stream})
     if topic:
         narrow.append({"operator": "topic", "operand": topic})
     if dm_with:
@@ -1097,8 +1095,7 @@ def _exclusion_terms(narrow: list[dict]) -> list[dict]:
     allowed = _allowed_private_streams()
     terms = []
     if not dm_reads_allowed():
-        # "private" rather than "dm": servers before Zulip 7.0 reject is:dm.
-        terms.append({"operator": "is", "operand": "private", "negated": True})
+        terms.append({"operator": "is", "operand": "dm", "negated": True})
     hide_private = not names_channels and _ALL_PRIVATE_STREAMS not in allowed
     hide_ignored = not names_channel and bool(_ignored_streams)
     if not (hide_private or hide_ignored):
@@ -1107,7 +1104,7 @@ def _exclusion_terms(narrow: list[dict]) -> list[dict]:
     for name, private in _visible_streams().items():
         if ((hide_private and private and name.lower() not in allowed)
                 or (hide_ignored and name.lower() in _ignored_streams)):
-            terms.append({"operator": "stream", "operand": name, "negated": True})
+            terms.append({"operator": "channel", "operand": name, "negated": True})
     return terms
 
 
@@ -1169,7 +1166,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
         request["anchor"] = "newest"
 
     result = client.get_messages(request)
-    if result.get("result") != "success" and any(t["operator"] == "stream" for t in exclusions):
+    if result.get("result") != "success" and any(t["operator"] == "channel" for t in exclusions):
         # The server rejects a narrow naming a stream deleted or renamed since
         # the stream list was cached; refresh it and retry once.
         _get_cache().delete(_VISIBLE_STREAMS_KEY)

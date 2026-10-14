@@ -66,6 +66,7 @@ Read-only mode constrains this server, not an agent that can read the personal z
 ## Requirements
 
 - Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
+- Zulip Server 9.0+ (`before` date bounds need 12.0+)
 - A `.zuliprc` file for Zulip API auth (see [Quickstart](#quickstart))
 - For listener mode: the selected backend CLI installed and authenticated (`claude` by default, `codex` with `--backend codex`, or `opencode` with `--backend opencode`)
 
