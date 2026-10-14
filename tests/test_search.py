@@ -232,20 +232,20 @@ def test_parse_naive_and_date_only_use_configured_timezone(
     tokyo = ZoneInfo("Asia/Tokyo")
     monkeypatch.setattr(core, "TIMEZONE", tokyo)
 
-    assert core.parse_datetime("2025-03-01") == datetime(2025, 3, 1, tzinfo=tokyo)
-    assert core.parse_datetime("2025-03-01T14:30") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
-    assert core.parse_datetime("2025-03-01 14:30:00") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
+    assert core._parse_datetime("2025-03-01") == datetime(2025, 3, 1, tzinfo=tokyo)
+    assert core._parse_datetime("2025-03-01T14:30") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
+    assert core._parse_datetime("2025-03-01 14:30:00") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
 
 
 def test_parse_explicit_offsets() -> None:
-    assert core.parse_datetime("2025-03-01T00:00:00Z") == utc(2025, 3, 1)
-    assert core.parse_datetime("2025-03-01T09:00:00+09:00") == utc(2025, 3, 1)
+    assert core._parse_datetime("2025-03-01T00:00:00Z") == utc(2025, 3, 1)
+    assert core._parse_datetime("2025-03-01T09:00:00+09:00") == utc(2025, 3, 1)
 
 
 @pytest.mark.parametrize("value", ["yesterday", "2025-13-01", "", "03/01/2025"])
 def test_parse_rejects_invalid(value: str) -> None:
     with pytest.raises(ValueError, match="Invalid date"):
-        core.parse_datetime(value)
+        core._parse_datetime(value)
 
 
 def test_tools_report_invalid_dates(client: FakeClient) -> None:

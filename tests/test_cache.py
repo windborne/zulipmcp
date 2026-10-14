@@ -9,9 +9,7 @@ from zulipmcp import core
 @pytest.fixture
 def cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("ZULIPMCP_CACHE_DIR", str(tmp_path))
-    core._open_cache.cache_clear()
-    yield tmp_path
-    core._open_cache.cache_clear()
+    return tmp_path
 
 
 def _use_identity(monkeypatch: pytest.MonkeyPatch, email: str,

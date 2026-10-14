@@ -915,8 +915,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
             return err
 
     try:
-        after_dt = zulip_core.parse_datetime(after) if after else None
-        before_dt = zulip_core.parse_datetime(before) if before else None
+        after_dt = zulip_core._parse_datetime(after) if after else None
+        before_dt = zulip_core._parse_datetime(before) if before else None
     except ValueError as e:
         return f"Error: {e}"
 
@@ -981,8 +981,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
             return err
 
     try:
-        after_dt = zulip_core.parse_datetime(after) if after else None
-        before_dt = zulip_core.parse_datetime(before) if before else None
+        after_dt = zulip_core._parse_datetime(after) if after else None
+        before_dt = zulip_core._parse_datetime(before) if before else None
         narrow = zulip_core.build_narrow(
             stream=stream, topic=topic, dm_with=dm_with, sender=sender, query=query,
         )

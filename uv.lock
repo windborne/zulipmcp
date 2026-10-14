@@ -1736,7 +1736,7 @@ requires-dist = [
     { name = "diskcache" },
     { name = "fastmcp" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
-    { name = "zulip" },
+    { name = "zulip", specifier = ">=0.8.2" },
 ]
 
 [package.metadata.requires-dev]

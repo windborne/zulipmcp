@@ -100,7 +100,6 @@ def transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str
     monkeypatch.setattr(requests.Session, "request", fake_request)
     monkeypatch.setattr(core, "_client", None)
     monkeypatch.setenv("ZULIPMCP_CACHE_DIR", str(tmp_path / "cache"))
-    core._open_cache.cache_clear()
     monkeypatch.setattr(core, "_stream_id_cache", {})
     return requests_seen
 

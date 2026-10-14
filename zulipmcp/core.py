@@ -7,7 +7,7 @@ import tempfile
 import json
 import urllib.parse
 from pathlib import Path
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import IO, Any, Callable, Dict, List, Mapping, Optional
 
@@ -411,10 +411,8 @@ def is_stream_private(stream_name: str) -> bool:
 
 
 @functools.cache
-def _open_cache(identity: str) -> diskcache.Cache:
-    base = os.environ.get("ZULIPMCP_CACHE_DIR",
-                          Path(tempfile.gettempdir()) / "zulipmcp_cache")
-    return diskcache.Cache(Path(base) / identity)
+def _open_cache(directory: Path) -> diskcache.Cache:
+    return diskcache.Cache(directory)
 
 
 def _get_cache() -> diskcache.Cache:
@@ -424,8 +422,10 @@ def _get_cache() -> diskcache.Cache:
     users must not share a directory.
     """
     client = get_client()
-    identity = hashlib.sha256(f"{client.base_url}|{client.email}".encode()).hexdigest()[:16]
-    return _open_cache(identity)
+    site = getattr(client, "base_url", "")
+    identity = hashlib.sha256(f"{site}|{client.email}".encode()).hexdigest()[:16]
+    base = os.environ.get("ZULIPMCP_CACHE_DIR") or Path(tempfile.gettempdir()) / "zulipmcp_cache"
+    return _open_cache(Path(base) / identity)
 
 
 class ReadOnlyError(PermissionError):
@@ -1008,22 +1008,20 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
     return msgs
 
 
-DATE_ANCHOR_FEATURE_LEVEL = 445
+_DATE_ANCHOR_FEATURE_LEVEL = 445
 
 
-def parse_datetime(value: str) -> datetime:
+def _parse_datetime(value: str) -> datetime:
     """Parse an ISO 8601 date or datetime into an aware datetime.
 
     Date-only and naive values are interpreted in ``TIMEZONE``.
     """
     text = value.strip()
+    # Python 3.10's fromisoformat rejects a trailing Z.
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
     try:
-        if len(text) == 10:
-            parsed = datetime.combine(date.fromisoformat(text), datetime.min.time())
-        else:
-            if text[-1:] in ("Z", "z"):
-                text = text[:-1] + "+00:00"
-            parsed = datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         raise ValueError(
             f"Invalid date {value!r}; use ISO 8601 such as 2025-03-01 or 2025-03-01T14:30"
@@ -1095,9 +1093,9 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
         request["anchor"] = before_message_id
         request["include_anchor"] = False
     elif before is not None:
-        if client.feature_level < DATE_ANCHOR_FEATURE_LEVEL:
+        if client.feature_level < _DATE_ANCHOR_FEATURE_LEVEL:
             raise ValueError(
-                f"before= requires Zulip 12.0+ (feature level {DATE_ANCHOR_FEATURE_LEVEL}); "
+                f"before= requires Zulip 12.0+ (feature level {_DATE_ANCHOR_FEATURE_LEVEL}); "
                 f"this server is at feature level {client.feature_level}"
             )
         request["anchor"] = "date"
