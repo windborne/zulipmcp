@@ -12,7 +12,7 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 1. Install the package:
 
    ```bash
-   uv add zulipmcp --git https://github.com/windborne/zulipmcp.git
+   uv add git+https://github.com/windborne/zulipmcp.git
    ```
 
 2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Add a bot or integration](https://zulip.com/help/add-a-bot-or-integration) for instructions on making a bot. The bot type must be "generic."
@@ -34,7 +34,7 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 
 ### Read as yourself, post as a bot
 
-A bot only sees the channels it is subscribed to and the DMs sent to it. To let an agent read everything you can see while it still posts as the bot, run two servers: one on the bot's zuliprc, and a read-only one on a zuliprc holding your personal [API key](https://zulip.com/api/api-keys). Installing the `zulipmcp` command once keeps launches from re-resolving dependencies:
+A bot can't read private channels it isn't in or DMs it isn't part of. To let an agent read everything you can see while it still posts as the bot, run two servers: one on the bot's zuliprc, and a read-only one on a zuliprc holding your personal [API key](https://zulip.com/api/api-keys). Installing the `zulipmcp` command once keeps launches from re-resolving dependencies:
 
 ```bash
 uv tool install git+https://github.com/windborne/zulipmcp.git   # update later with: uv tool upgrade zulipmcp
@@ -235,7 +235,7 @@ The typing indicator starts on `set_context()` and after every `reply()`, and st
 
 ### Reading history and search
 
-`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search, by default over messages this account received, or all public history with `scope="public"`. Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+). Private-stream hits outside `BOT_ALLOWED_PRIVATE_STREAMS` are dropped even when the server returns them; DMs need `__ALL__`.
+`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search, by default over messages this account received (or one stream's full history when `stream` is set), or all public history with `scope="public"`. Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+). Private streams outside `BOT_ALLOWED_PRIVATE_STREAMS` are excluded from every read; DMs need `__ALL__`.
 
 ### Bot visibility filtering
 
