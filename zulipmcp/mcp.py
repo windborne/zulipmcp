@@ -5,8 +5,8 @@ All Zulip logic lives in zulipmcp.core; this file only handles MCP tool
 registration and session state.
 
 Usage:
-    python -m zulipmcp.mcp                  # stdio (Claude Code)
-    python -m zulipmcp.mcp --transport sse  # SSE
+    python -m zulipmcp                  # stdio (Claude Code)
+    python -m zulipmcp --transport sse  # SSE
 
 Bot visibility filtering:
     - Topics containing '/nobots' or '/nb' are hidden from the bot (not shown in topic lists or messages)
@@ -65,8 +65,8 @@ WRITE_STREAM_ERROR = (
 
 
 def _reject_if_private(stream: str) -> str | None:
-    """Return an error string if the stream is private, None otherwise."""
-    if zulip_core.is_stream_private(stream) and not zulip_core.is_private_stream_allowed(stream):
+    """Return an error string if the stream is private and not allowlisted, None otherwise."""
+    if not zulip_core.is_private_stream_allowed(stream):
         return PRIVATE_STREAM_ERROR
     return None
 
@@ -869,11 +869,26 @@ def get_stream_members(stream: str) -> str:
     return "\n".join(lines)
 
 
-def _parse_bounds(after: str, before: str) -> tuple[Optional[datetime], Optional[datetime]]:
-    """Parse optional ``after``/``before`` tool arguments. Raises ValueError."""
-    after_dt = zulip_core._parse_datetime(after) if after else None
-    before_dt = zulip_core._parse_datetime(before) if before else None
-    return after_dt, before_dt
+def _parse_when(value: str) -> Optional[datetime]:
+    """Parse an ISO 8601 date/datetime argument, or None for "". Raises ValueError.
+
+    Date-only and naive values are interpreted in ``zulip_core.TIMEZONE``.
+    """
+    if not value:
+        return None
+    text = value.strip()
+    # Python 3.10's fromisoformat rejects a trailing Z.
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"Invalid date {value!r}; use ISO 8601 such as 2025-03-01 or 2025-03-01T14:30"
+        ) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=zulip_core.TIMEZONE)
+    return parsed
 
 
 def _dm_label(emails: list[str]) -> str:
@@ -934,11 +949,10 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
     if ends_at_message_id:
         before_message_id = message_id + 1
     try:
-        after_dt, before_dt = _parse_bounds(after, before)
         page = zulip_core.fetch_narrow(
             zulip_core.build_narrow(stream=stream, topic=topic, dm_with=dm_with),
             num_messages=num_messages, before_message_id=before_message_id,
-            after=after_dt, before=before_dt,
+            after=_parse_when(after), before=_parse_when(before),
         )
     except ValueError as e:
         return f"Error: {e}"
@@ -946,10 +960,10 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
     header = f"Messages from {label}:"
     if ends_at_message_id:
         header = f"History for {label} (up to message {message_id}):"
-    if page.reached_after:
-        header += f"\n(Reached after={after}; nothing older shown.)"
-    elif page.older_than is not None:
+    if page.older_than is not None:
         header += f"\n(Older: before_message_id={page.older_than})"
+    elif after:
+        header += f"\n(No older messages at or after {after}.)"
     else:
         header += "\n(No older messages.)"
     return header + "\n\n" + zulip_core.format_messages(page.messages)
@@ -988,8 +1002,6 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         return "Error: dm_with cannot be combined with stream/topic."
     if scope == "public" and dm_with:
         return "Error: scope='public' cannot be combined with dm_with."
-    if scope == "public" and stream:
-        return "Error: scope='public' is redundant with stream."
     if dm_with and not zulip_core.dm_reads_allowed():
         return DM_READS_ERROR
     if stream:
@@ -998,24 +1010,23 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
             return err
 
     try:
-        after_dt, before_dt = _parse_bounds(after, before)
         narrow = zulip_core.build_narrow(
             stream=stream, topic=topic, dm_with=dm_with, sender=sender, query=query,
-            channels="public" if scope == "public" else None,
+            channels="public" if scope == "public" and not stream else None,
         )
         page = zulip_core.fetch_narrow(
             narrow, num_messages=num_messages, before_message_id=before_message_id,
-            after=after_dt, before=before_dt,
+            after=_parse_when(after), before=_parse_when(before),
         )
     except ValueError as e:
         return f"Error: {e}"
 
     messages = zulip_core.filter_for_bot(page.messages)
     count = f"{len(messages)} result{'' if len(messages) == 1 else 's'}"
-    if page.reached_after:
-        status = f"{count}; reached after={after}"
-    elif page.older_than is not None:
+    if page.older_than is not None:
         status = f"{count}; older: before_message_id={page.older_than}"
+    elif after:
+        status = f"{count}; no older matches at or after {after}"
     else:
         status = f"{count}; no older matches"
     header = f"Search as {zulip_core.get_client().email} ({status})"
@@ -1516,9 +1527,5 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Zulip MCP Server")
-    parser.add_argument("--transport", choices=["stdio", "sse"], default="stdio")
-    parser.add_argument("--port", type=int, default=8235)
-    args = parser.parse_args()
-    run_server(transport=args.transport, port=args.port)
+    from zulipmcp.__main__ import main
+    main()

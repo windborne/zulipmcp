@@ -292,7 +292,7 @@ def _get_stream_message_for_write(message_id: int) -> tuple[Optional[dict], Opti
 
 
 def set_ignored_streams(streams: set[str]) -> None:
-    """Set streams to exclude from all message fetches."""
+    """Set streams to exclude from message fetches; fetch_narrow keeps them when its narrow names a channel."""
     global _ignored_streams
     _ignored_streams = {s.lower() for s in streams}
 
@@ -442,26 +442,22 @@ class ReadOnlyError(PermissionError):
     """Raised when a write is attempted while ``ZULIPMCP_READ_ONLY`` is on."""
 
 
-def _env_flag(name: str, on: tuple[str, ...], off: tuple[str, ...]) -> bool:
-    """Parse a boolean env var; unrecognized values raise ValueError."""
-    raw = os.environ.get(name, "")
-    value = raw.strip().lower()
-    if value in on:
-        return True
-    if value in off:
-        return False
-    allowed = ", ".join(v for v in on + off if v)
-    raise ValueError(f"Invalid {name}={raw!r}; use one of {allowed}, or leave it unset")
-
-
 def is_read_only() -> bool:
     """Whether ``ZULIPMCP_READ_ONLY`` is on. Raises ValueError on unrecognized values."""
-    return _env_flag("ZULIPMCP_READ_ONLY", on=("1", "true", "yes", "on"),
-                     off=("", "0", "false", "no", "off"))
+    raw = os.environ.get("ZULIPMCP_READ_ONLY", "")
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("", "0", "false", "no", "off"):
+        return False
+    raise ValueError(
+        f"Invalid ZULIPMCP_READ_ONLY={raw!r}; use one of 1, true, yes, on, 0, false, no, off, "
+        f"or leave it unset"
+    )
 
 
 class _ReadOnlyAdapter(HTTPAdapter):
-    """Transport adapter that refuses every non-GET request before sending it."""
+    """Refuses every non-GET at the transport, beneath API calls, raw ``session.*`` and redirects."""
 
     def send(self, request: requests.PreparedRequest, *args: Any, **kwargs: Any) -> requests.Response:
         if request.method != "GET":
@@ -470,7 +466,7 @@ class _ReadOnlyAdapter(HTTPAdapter):
 
 
 class _ReadOnlyClient(zulip.Client):
-    """Client whose session's transport adapters refuse every non-GET request."""
+    """Mounts :class:`_ReadOnlyAdapter` on both schemes so every session request passes through it."""
 
     def ensure_session(self) -> None:
         if self.session:
@@ -1032,26 +1028,6 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
 _DATE_ANCHOR_FEATURE_LEVEL = 445
 
 
-def _parse_datetime(value: str) -> datetime:
-    """Parse an ISO 8601 date or datetime into an aware datetime.
-
-    Date-only and naive values are interpreted in ``TIMEZONE``.
-    """
-    text = value.strip()
-    # Python 3.10's fromisoformat rejects a trailing Z.
-    if text[-1:] in ("Z", "z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        raise ValueError(
-            f"Invalid date {value!r}; use ISO 8601 such as 2025-03-01 or 2025-03-01T14:30"
-        ) from None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=TIMEZONE)
-    return parsed
-
-
 def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
                  dm_with: Optional[list[str]] = None, sender: Optional[str] = None,
                  query: Optional[str] = None, channels: Optional[str] = None) -> list[dict]:
@@ -1137,12 +1113,10 @@ class MessagePage(NamedTuple):
     """One page from :func:`fetch_narrow`.
 
     ``older_than`` is the ``before_message_id`` for the next page, or None
-    when nothing older is in range. ``reached_after`` is True when the
-    ``after`` bound cut the page.
+    when nothing older is in range.
     """
     messages: list[dict]
     older_than: Optional[int]
-    reached_after: bool
 
 
 def fetch_narrow(narrow: list[dict], num_messages: int = 20,
@@ -1215,7 +1189,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
     if oldest and not reached_after and (trimmed or not result.get("found_oldest", False)):
         older_than = oldest[0]["id"]
 
-    return MessagePage([m for m in page if _is_readable(m)], older_than, reached_after)
+    return MessagePage([m for m in page if _is_readable(m)], older_than)
 
 
 def send_message(stream: str, topic: str, content: str) -> dict:

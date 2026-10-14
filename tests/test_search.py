@@ -271,17 +271,16 @@ def test_before_keeps_newest_anchor_when_date_is_future(client: FakeClient) -> N
 
 # --- after bound -------------------------------------------------------------
 
-def test_after_filters_and_reports_bound(client: FakeClient) -> None:
+def test_after_filters_and_stops_paging(client: FakeClient) -> None:
     client.messages = [stream_msg(3, 300), stream_msg(1, 100), stream_msg(2, 200)]
 
-    page = core.fetch_narrow([], after=datetime.fromtimestamp(200, timezone.utc))
+    page = core.fetch_narrow([], num_messages=3, after=datetime.fromtimestamp(200, timezone.utc))
     assert [m["id"] for m in page.messages] == [2, 3]
-    assert page.reached_after is True
     assert page.older_than is None
 
-    page = core.fetch_narrow([], after=datetime.fromtimestamp(50, timezone.utc))
-    assert [m["id"] for m in page.messages] == [1, 2, 3]
-    assert page.reached_after is False
+    page = core.fetch_narrow([], num_messages=2, after=datetime.fromtimestamp(50, timezone.utc))
+    assert [m["id"] for m in page.messages] == [2, 3]
+    assert page.older_than == 2
 
 
 def test_after_must_precede_before(client: FakeClient) -> None:
@@ -322,7 +321,7 @@ def test_older_than_counts_messages_dropped_client_side(client: FakeClient) -> N
 
 
 def test_older_than_is_none_for_empty_page(client: FakeClient) -> None:
-    assert core.fetch_narrow([]) == core.MessagePage([], None, False)
+    assert core.fetch_narrow([]) == core.MessagePage([], None)
 
 
 # --- date parsing ------------------------------------------------------------
@@ -333,20 +332,24 @@ def test_parse_naive_and_date_only_use_configured_timezone(
     tokyo = ZoneInfo("Asia/Tokyo")
     monkeypatch.setattr(core, "TIMEZONE", tokyo)
 
-    assert core._parse_datetime("2025-03-01") == datetime(2025, 3, 1, tzinfo=tokyo)
-    assert core._parse_datetime("2025-03-01T14:30") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
-    assert core._parse_datetime("2025-03-01 14:30:00") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
+    assert mcp._parse_when("2025-03-01") == datetime(2025, 3, 1, tzinfo=tokyo)
+    assert mcp._parse_when("2025-03-01T14:30") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
+    assert mcp._parse_when("2025-03-01 14:30:00") == datetime(2025, 3, 1, 14, 30, tzinfo=tokyo)
 
 
 def test_parse_explicit_offsets() -> None:
-    assert core._parse_datetime("2025-03-01T00:00:00Z") == utc(2025, 3, 1)
-    assert core._parse_datetime("2025-03-01T09:00:00+09:00") == utc(2025, 3, 1)
+    assert mcp._parse_when("2025-03-01T00:00:00Z") == utc(2025, 3, 1)
+    assert mcp._parse_when("2025-03-01T09:00:00+09:00") == utc(2025, 3, 1)
 
 
-@pytest.mark.parametrize("value", ["yesterday", "2025-13-01", "", "03/01/2025"])
+def test_parse_empty_is_unbounded() -> None:
+    assert mcp._parse_when("") is None
+
+
+@pytest.mark.parametrize("value", ["yesterday", "2025-13-01", " ", "03/01/2025"])
 def test_parse_rejects_invalid(value: str) -> None:
     with pytest.raises(ValueError, match="Invalid date"):
-        core._parse_datetime(value)
+        mcp._parse_when(value)
 
 
 def test_tools_report_invalid_dates(client: FakeClient) -> None:
@@ -445,7 +448,7 @@ def test_exclusion_terms_hide_dms_even_in_dm_narrow(client: FakeClient) -> None:
     page = core.fetch_narrow(core.build_narrow(dm_with=[ALICE]))
 
     assert NO_DMS in client.requests[0]["narrow"]
-    assert page == core.MessagePage([], None, False)
+    assert page == core.MessagePage([], None)
 
 
 def test_stream_list_is_fetched_once(client: FakeClient) -> None:
@@ -471,7 +474,7 @@ def test_hidden_message_ids_never_surface(client: FakeClient, num_messages: int)
     page = core.fetch_narrow([], num_messages=num_messages)
     out = search_messages(query="x", num_messages=num_messages)
 
-    assert page == core.MessagePage([], None, False)
+    assert page == core.MessagePage([], None)
     assert "900" not in out and "hidden" not in out
 
 
@@ -597,7 +600,7 @@ def test_get_messages_stream_with_after(client: FakeClient) -> None:
 
     assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t") + [NO_DMS]
     assert 'id="2"' in out and 'id="1"' not in out
-    assert "Reached after=1970-01-01T00:02:00" in out
+    assert "(No older messages at or after 1970-01-01T00:02:00.)" in out
 
 
 @pytest.mark.parametrize("kwargs, error", [
@@ -704,13 +707,16 @@ def test_search_scope_public_searches_all_public_channels(client: FakeClient) ->
     ]
 
 
-@pytest.mark.parametrize("kwargs, error", [
-    ({"dm_with": [ALICE]}, "Error: scope='public' cannot be combined with dm_with."),
-    ({"stream": "general"}, "Error: scope='public' is redundant with stream."),
-])
-def test_search_scope_public_conflicts(dm_reads: FakeClient, kwargs: dict, error: str) -> None:
-    assert search_messages(query="x", scope="public", **kwargs) == error
+def test_search_scope_public_conflicts_with_dm_with(dm_reads: FakeClient) -> None:
+    error = "Error: scope='public' cannot be combined with dm_with."
+    assert search_messages(query="x", scope="public", dm_with=[ALICE]) == error
     assert dm_reads.requests == []
+
+
+def test_search_stream_overrides_scope_public(dm_reads: FakeClient) -> None:
+    search_messages(query="x", stream="general", scope="public")
+
+    assert dm_reads.requests[0]["narrow"] == core.build_narrow(stream="general", query="x")
 
 
 def test_search_header_and_output(dm_reads: FakeClient) -> None:
@@ -733,7 +739,7 @@ def test_search_header_reports_after_bound(client: FakeClient) -> None:
 
     out = search_messages(query="x", after="1970-01-01T00:02:00")
 
-    assert out.startswith(f"Search as {BOT} (1 result; reached after=1970-01-01T00:02:00)")
+    assert out.startswith(f"Search as {BOT} (1 result; no older matches at or after 1970-01-01T00:02:00)")
 
 
 def test_search_header_without_results(client: FakeClient) -> None:
