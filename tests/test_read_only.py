@@ -205,6 +205,17 @@ def test_read_only_direct_session_use_is_blocked(
     assert all(method == "GET" for method, _ in transport)
 
 
+def test_read_only_fails_closed_without_guarded_session(
+    transport: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1")
+    monkeypatch.setattr(core._ReadOnlyClient, "ensure_session", zulip.Client.ensure_session)
+
+    with pytest.raises(RuntimeError, match="session is unguarded"):
+        core.get_client()
+    assert core._client is None
+
+
 def test_read_only_off_uses_plain_client(
     transport: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

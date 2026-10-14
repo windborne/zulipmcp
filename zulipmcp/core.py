@@ -512,7 +512,15 @@ def get_client() -> zulip.Client:
                 f"Set ZULIP_RC_PATH env var or place .zuliprc in the working directory."
             )
         client_class = _ReadOnlyClient if is_read_only() else zulip.Client
-        _client = client_class(config_file=str(config_path))
+        client = client_class(config_file=str(config_path))
+        if isinstance(client, _ReadOnlyClient):
+            # Fail closed if a zulip release builds its session in a way
+            # that skips ensure_session() and so the guard.
+            client.ensure_session()
+            session = client.session
+            if session is None or not isinstance(session.get_adapter(client.base_url), _ReadOnlyAdapter):
+                raise RuntimeError("ZULIPMCP_READ_ONLY is set but the client session is unguarded")
+        _client = client
         # Log identity so it's visible in MCP startup output
         email = _client.email or "unknown"
         mode = " [read-only]" if isinstance(_client, _ReadOnlyClient) else ""
