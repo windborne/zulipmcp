@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import diskcache
 import requests
@@ -982,24 +982,21 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
 
 def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
                        before_message_id: Optional[int] = None) -> list[dict]:
-    """Get messages from a specific stream/topic. Returns raw message dicts sorted by ID."""
+    """Get messages from a stream/topic up to and including ``before_message_id``.
+
+    Returns raw message dicts sorted by ID, or [] on error or when the
+    stream is a disallowed private stream.
+    """
     if not is_private_stream_allowed(stream):
         return []
-    result = get_client().get_messages({
-        "narrow": [
-            {"operator": "stream", "operand": stream},
-            {"operator": "topic", "operand": topic},
-        ],
-        "anchor": before_message_id or "newest",
-        "num_before": min(num_messages, 100),
-        "num_after": 0,
-        "apply_markdown": False,
-    })
-    if result["result"] != "success":
+    try:
+        page = fetch_narrow(
+            build_narrow(stream=stream, topic=topic), num_messages=num_messages,
+            before_message_id=before_message_id + 1 if before_message_id else None,
+        )
+    except ValueError:
         return []
-    msgs = result.get("messages", [])
-    msgs.sort(key=lambda m: m["id"])
-    return msgs
+    return page.messages
 
 
 def fetch_new_messages(stream: str, topic: str, after_id: int,
@@ -1074,34 +1071,48 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
     return narrow
 
 
-def _is_readable(msg: dict) -> bool:
+def _is_readable(msg: dict, skip_ignored: bool) -> bool:
     """Whether a fetched message passes the private-stream allowlist and ignore list."""
     if msg.get("type") != "stream":
         return True
     stream = msg.get("display_recipient", "")
-    if stream.lower() in _ignored_streams:
+    if skip_ignored and stream.lower() in _ignored_streams:
         return False
     return is_private_stream_allowed(stream)
+
+
+class MessagePage(NamedTuple):
+    """One page from :func:`fetch_narrow`.
+
+    ``older_than`` is the ``before_message_id`` for the next page, or None
+    when nothing older is in range. ``reached_after`` is True when the
+    ``after`` bound cut the page.
+    """
+    messages: list[dict]
+    older_than: Optional[int]
+    reached_after: bool
 
 
 def fetch_narrow(narrow: list[dict], num_messages: int = 20,
                  before_message_id: Optional[int] = None,
                  after: Optional[datetime] = None,
-                 before: Optional[datetime] = None) -> tuple[list[dict], bool]:
+                 before: Optional[datetime] = None) -> MessagePage:
     """Fetch one page of messages matching a narrow, paging backward.
 
-    The page ends just before ``before_message_id`` if given, else just
-    before the ``before`` datetime, else at the newest message. ``after`` is
-    a client-side lower bound. Messages in private streams outside the
-    allowlist, or in ignored streams, are dropped even when the server
-    returns them.
+    The page ends just before ``before_message_id`` (exclusive) if given,
+    else just before the ``before`` datetime, else at the newest message.
+    ``after`` is a client-side lower bound. Messages in private streams
+    outside the allowlist are dropped even when the server returns them, as
+    are ignored streams unless the narrow names a channel.
 
-    Returns (messages sorted by ID, whether the ``after`` bound cut the page).
-    Raises ValueError on API errors, or when ``before`` sets the anchor on a
-    server older than Zulip 12.0.
+    Raises ValueError on API errors, when ``after`` is not earlier than
+    ``before``, or when ``before`` sets the anchor on a server older than
+    Zulip 12.0.
     """
+    if after is not None and before is not None and after >= before:
+        raise ValueError("after must be earlier than before")
     client = get_client()
-    limit = min(num_messages, 100)
+    limit = max(min(num_messages, 100), 0)
     request: dict = {
         "narrow": narrow,
         "num_before": limit,
@@ -1129,29 +1140,29 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
     result = client.get_messages(request)
     if result.get("result") != "success":
         raise ValueError(f"Zulip API error: {result.get('msg', 'unknown error')}")
-    msgs = sorted(result.get("messages", []), key=lambda m: m["id"])
+    raw = sorted(result.get("messages", []), key=lambda m: m["id"])
 
+    msgs = raw
     if before is not None:
         cutoff = before.timestamp()
         msgs = [m for m in msgs if m.get("timestamp", 0) < cutoff]
-    msgs = msgs[-limit:] if limit > 0 else []
+    page = msgs[-limit:] if limit else []
+    trimmed = len(page) < len(msgs)
 
-    after_reached = False
+    reached_after = False
     if after is not None:
         floor = after.timestamp()
-        in_range = [m for m in msgs if m.get("timestamp", 0) >= floor]
-        after_reached = len(in_range) < len(msgs)
-        msgs = in_range
+        in_range = [m for m in page if m.get("timestamp", 0) >= floor]
+        reached_after = len(in_range) < len(page)
+        page = in_range
 
-    return [m for m in msgs if _is_readable(m)], after_reached
+    oldest = page or msgs or raw
+    older_than = None
+    if oldest and not reached_after and (trimmed or not result.get("found_oldest", False)):
+        older_than = oldest[0]["id"]
 
-
-def dm_partner_emails(msg: dict) -> list[str]:
-    """Emails of a DM's other participants, or just self for a self-DM."""
-    me = (get_client().email or "").lower()
-    emails = [r["email"] for r in msg.get("display_recipient", []) if r.get("email")]
-    others = [e for e in emails if e.lower() != me]
-    return others or emails
+    skip_ignored = not any(t.get("operator") in ("channel", "stream") for t in narrow)
+    return MessagePage([m for m in page if _is_readable(m, skip_ignored)], older_than, reached_after)
 
 
 def send_message(stream: str, topic: str, content: str) -> dict:
@@ -1389,7 +1400,7 @@ def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
     if result.get("result") != "success" or not result.get("messages"):
         return None
     target = result["messages"][0]
-    if target.get("type") != "stream":
+    if target.get("id") != message_id or target.get("type") != "stream":
         return None
     stream = target.get("display_recipient", "")
     topic = target.get("subject", "")
@@ -1440,6 +1451,9 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     if result.get("result") != "success" or not result.get("messages"):
         return None
     msg = result["messages"][0]
+    # The server substitutes the nearest message when the ID doesn't exist.
+    if msg.get("id") != message_id:
+        return None
     if msg.get("type") == "stream":
         stream = msg.get("display_recipient", "")
         if stream and not is_private_stream_allowed(stream):

@@ -19,6 +19,7 @@ from .core import (
     fetch_new_messages,
     build_narrow,
     fetch_narrow,
+    MessagePage,
     send_message,
     add_reaction,
     remove_reaction,

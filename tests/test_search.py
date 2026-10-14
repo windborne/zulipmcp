@@ -65,7 +65,19 @@ class FakeClient:
             return {"result": "error", "msg": error}
         if self.response is not None:
             return self.response
-        return {"result": "success", "messages": [dict(m) for m in self.messages]}
+        msgs = sorted(self.messages, key=lambda m: m["id"])
+        anchor = request.get("anchor")
+        if anchor == "date":
+            page, found_oldest = msgs, True
+        else:
+            if isinstance(anchor, int):
+                inclusive = request.get("include_anchor", True)
+                msgs = [m for m in msgs if m["id"] < anchor or (inclusive and m["id"] == anchor)]
+            limit = request["num_before"]
+            page = msgs[-limit:] if limit else []
+            found_oldest = len(page) == len(msgs)
+        return {"result": "success", "messages": [dict(m) for m in page],
+                "found_oldest": found_oldest}
 
     def get_streams(self, **_kwargs: Any) -> dict:
         return {"result": "success", "streams": self.streams}
@@ -197,17 +209,19 @@ def test_before_filters_anchor_and_trims(client: FakeClient) -> None:
     client.messages = [stream_msg(i, cutoff - 10 + i) for i in range(1, 4)]
     client.messages.append(stream_msg(10, cutoff))
 
-    msgs, _ = core.fetch_narrow([], num_messages=2, before=utc(2025, 3, 1))
+    page = core.fetch_narrow([], num_messages=2, before=utc(2025, 3, 1))
 
-    assert [m["id"] for m in msgs] == [2, 3]
+    assert [m["id"] for m in page.messages] == [2, 3]
+    assert page.older_than == 2
 
 
 def test_before_keeps_newest_anchor_when_date_is_future(client: FakeClient) -> None:
     client.messages = [stream_msg(1, 100), stream_msg(2, 200)]
 
-    msgs, _ = core.fetch_narrow([], num_messages=2, before=utc(2100, 1, 1))
+    page = core.fetch_narrow([], num_messages=2, before=utc(2100, 1, 1))
 
-    assert [m["id"] for m in msgs] == [1, 2]
+    assert [m["id"] for m in page.messages] == [1, 2]
+    assert page.older_than is None
 
 
 # --- after bound -------------------------------------------------------------
@@ -215,13 +229,54 @@ def test_before_keeps_newest_anchor_when_date_is_future(client: FakeClient) -> N
 def test_after_filters_and_reports_bound(client: FakeClient) -> None:
     client.messages = [stream_msg(3, 300), stream_msg(1, 100), stream_msg(2, 200)]
 
-    msgs, reached = core.fetch_narrow([], after=datetime.fromtimestamp(200, timezone.utc))
-    assert [m["id"] for m in msgs] == [2, 3]
-    assert reached is True
+    page = core.fetch_narrow([], after=datetime.fromtimestamp(200, timezone.utc))
+    assert [m["id"] for m in page.messages] == [2, 3]
+    assert page.reached_after is True
+    assert page.older_than is None
 
-    msgs, reached = core.fetch_narrow([], after=datetime.fromtimestamp(50, timezone.utc))
-    assert [m["id"] for m in msgs] == [1, 2, 3]
-    assert reached is False
+    page = core.fetch_narrow([], after=datetime.fromtimestamp(50, timezone.utc))
+    assert [m["id"] for m in page.messages] == [1, 2, 3]
+    assert page.reached_after is False
+
+
+def test_after_must_precede_before(client: FakeClient) -> None:
+    with pytest.raises(ValueError, match="after must be earlier than before"):
+        core.fetch_narrow([], after=utc(2025, 3, 1), before=utc(2025, 3, 1))
+    error = "Error: after must be earlier than before"
+    assert search_messages(query="x", after="2025-03-02", before="2025-03-01") == error
+    assert get_messages(stream="general", topic="t", after="2025-03-02", before="2025-03-01") == error
+    assert client.requests == []
+
+
+# --- paging ------------------------------------------------------------------
+
+def test_older_than_pages_back_until_oldest(client: FakeClient) -> None:
+    client.messages = [stream_msg(i) for i in range(1, 6)]
+
+    pages = []
+    cursor = None
+    while True:
+        page = core.fetch_narrow([], num_messages=2, before_message_id=cursor)
+        pages.append([m["id"] for m in page.messages])
+        if page.older_than is None:
+            break
+        cursor = page.older_than
+
+    assert pages == [[4, 5], [2, 3], [1]]
+    assert client.requests[1]["include_anchor"] is False
+
+
+def test_older_than_counts_filtered_messages(client: FakeClient) -> None:
+    client.messages = [stream_msg(1), stream_msg(2, stream="secret"), stream_msg(3)]
+
+    page = core.fetch_narrow([], num_messages=2)
+
+    assert [m["id"] for m in page.messages] == [3]
+    assert page.older_than == 2
+
+
+def test_older_than_is_none_for_empty_page(client: FakeClient) -> None:
+    assert core.fetch_narrow([]) == core.MessagePage([], None, False)
 
 
 # --- date parsing ------------------------------------------------------------
@@ -262,21 +317,28 @@ def test_private_hit_dropped_unless_allowlisted(
     client.messages = [stream_msg(1, stream="general"), stream_msg(2, stream="secret"),
                        dm_msg(3, [ALICE, BOT])]
 
-    msgs, _ = core.fetch_narrow([])
-    assert [m["id"] for m in msgs] == [1, 3]
+    assert [m["id"] for m in core.fetch_narrow([]).messages] == [1, 3]
 
     monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "__ALL__")
-    msgs, _ = core.fetch_narrow([])
-    assert [m["id"] for m in msgs] == [1, 2, 3]
+    assert [m["id"] for m in core.fetch_narrow([]).messages] == [1, 2, 3]
 
 
 def test_ignored_streams_dropped(client: FakeClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core, "_ignored_streams", {"noise"})
-    client.messages = [stream_msg(1, stream="general"), stream_msg(2, stream="Noise")]
+    client.messages = [stream_msg(1, stream="general"),
+                       stream_msg(2, stream="Noise", content="drowned out")]
 
-    msgs, _ = core.fetch_narrow([])
+    assert [m["id"] for m in core.fetch_narrow([]).messages] == [1]
+    assert "drowned out" not in search_messages(query="x")
 
-    assert [m["id"] for m in msgs] == [1]
+
+def test_ignored_stream_reads_when_named(client: FakeClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core, "_ignored_streams", {"noise"})
+    client.messages = [stream_msg(2, stream="noise", content="drowned out")]
+
+    assert "drowned out" in search_messages(query="x", stream="noise")
+    assert "drowned out" in get_messages(stream="noise", topic="t")
+    assert [m["id"] for m in core.get_topic_messages("noise", "t")] == [2]
 
 
 def test_search_rejects_disallowed_private_stream(client: FakeClient) -> None:
@@ -309,37 +371,80 @@ def test_get_messages_dm_message_id_derives_partners(client: FakeClient) -> None
     out = get_messages(message_id=5)
 
     request = client.requests[0]
-    assert request["narrow"] == [{"operator": "dm", "operand": f"{ALICE},{BOB}"}]
-    assert request["anchor"] == 6
-    assert out.startswith(f"History for DM with {ALICE}, {BOB} (around message 5):")
+    assert request["narrow"] == [{"operator": "dm", "operand": f"{ALICE},{BOB},{BOT}"}]
+    assert (request["anchor"], request["include_anchor"]) == (6, False)
+    assert out.startswith(f"History for DM with {ALICE}, {BOB} (up to message 5):")
 
 
 def test_get_messages_self_dm_message_id(client: FakeClient) -> None:
     client.messages = [dm_msg(5, [BOT])]
 
-    get_messages(message_id=5)
+    out = get_messages(message_id=5)
 
     assert client.requests[0]["narrow"] == [{"operator": "dm", "operand": BOT}]
+    assert out.startswith(f"History for DM with {BOT} (up to message 5):")
 
 
 def test_get_messages_unknown_message_id(client: FakeClient) -> None:
     assert get_messages(message_id=99) == "Message 99 not found or not accessible."
 
 
-def test_get_messages_stream_without_dates_uses_topic_fetch(
-    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple] = []
-    monkeypatch.setattr(
-        core, "get_topic_messages",
-        lambda stream, topic, num_messages=20, before_message_id=None:
-            calls.append((stream, topic, num_messages, before_message_id)) or [stream_msg(1)],
-    )
+def test_get_messages_before_message_id_is_exclusive(client: FakeClient) -> None:
+    client.messages = [stream_msg(i) for i in range(1, 6)]
 
-    out = get_messages(stream="general", topic="t", before_message_id=50)
+    out = get_messages(stream="general", topic="t", before_message_id=4, num_messages=2)
 
-    assert calls == [("general", "t", 20, 50)]
-    assert out.startswith("Messages from [public] #general > t:")
+    request = client.requests[0]
+    assert request["narrow"] == core.build_narrow(stream="general", topic="t")
+    assert (request["anchor"], request["include_anchor"]) == (4, False)
+    assert out.startswith("Messages from [public] #general > t:\n(Older: before_message_id=2)")
+    assert 'id="3"' in out and 'id="4"' not in out
+
+
+def test_get_messages_stream_message_id_includes_it(client: FakeClient) -> None:
+    client.messages = [stream_msg(i) for i in range(1, 6)]
+
+    out = get_messages(message_id=3)
+
+    assert (client.requests[0]["anchor"], client.requests[0]["include_anchor"]) == (4, False)
+    assert out.startswith("History for [public] #general > t (up to message 3):\n(No older messages.)")
+    assert 'id="3"' in out and 'id="4"' not in out
+
+
+def test_get_messages_message_id_in_disallowed_private_stream(client: FakeClient) -> None:
+    client.messages = [stream_msg(5, stream="secret")]
+
+    assert get_messages(message_id=5) == "Message 5 not found or not accessible."
+    assert client.requests == []
+
+
+def test_get_message_by_id_rejects_substituted_message(client: FakeClient) -> None:
+    client.messages = [stream_msg(7)]
+    client.get_messages = lambda request: {"result": "success", "messages": [stream_msg(7)]}
+
+    assert core.get_message_by_id(5) is None
+    assert core.discover_message_context(5) is None
+    assert core.get_message_by_id(7)["id"] == 7
+
+
+def test_get_topic_messages_is_inclusive(client: FakeClient) -> None:
+    client.messages = [stream_msg(i) for i in range(1, 6)]
+
+    msgs = core.get_topic_messages("general", "t", num_messages=2, before_message_id=4)
+
+    assert [m["id"] for m in msgs] == [3, 4]
+    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t")
+    assert (client.requests[0]["anchor"], client.requests[0]["include_anchor"]) == (5, False)
+    assert [m["id"] for m in core.get_topic_messages("general", "t")] == [1, 2, 3, 4, 5]
+
+
+def test_get_topic_messages_empty_on_error_or_private(client: FakeClient) -> None:
+    client.messages = [stream_msg(1, stream="secret")]
+    assert core.get_topic_messages("secret", "t") == []
+    assert client.requests == []
+
+    client.response = {"result": "error", "msg": "boom"}
+    assert core.get_topic_messages("general", "t") == []
 
 
 def test_get_messages_stream_with_after(client: FakeClient) -> None:
@@ -384,7 +489,7 @@ def test_search_header_and_output(client: FakeClient) -> None:
 
     out = search_messages(query="deploy")
 
-    assert out.startswith(f"Search as {BOT} (2 results; older: before_message_id=7)\n\n")
+    assert out.startswith(f"Search as {BOT} (2 results; no older matches)\n\n")
     assert 'stream="general"' in out and 'topic="t"' in out
     assert f'dm="{ALICE}, {BOT}"' in out
     assert "deploy secret" not in out
@@ -399,7 +504,15 @@ def test_search_header_reports_after_bound(client: FakeClient) -> None:
 
 
 def test_search_header_without_results(client: FakeClient) -> None:
-    assert search_messages(query="x") == f"Search as {BOT} (0 results)"
+    assert search_messages(query="x") == f"Search as {BOT} (0 results; no older matches)"
+
+
+def test_search_header_reports_older_page(client: FakeClient) -> None:
+    client.messages = [stream_msg(i) for i in range(1, 6)]
+
+    out = search_messages(query="x", num_messages=2)
+
+    assert out.startswith(f"Search as {BOT} (2 results; older: before_message_id=4)")
 
 
 def test_format_messages_dm_attribute() -> None:

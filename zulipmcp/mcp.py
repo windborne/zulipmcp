@@ -869,26 +869,40 @@ def get_stream_members(stream: str) -> str:
     return "\n".join(lines)
 
 
+def _parse_bounds(after: str, before: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Parse optional ``after``/``before`` tool arguments. Raises ValueError."""
+    after_dt = zulip_core._parse_datetime(after) if after else None
+    before_dt = zulip_core._parse_datetime(before) if before else None
+    return after_dt, before_dt
+
+
+def _dm_label(emails: list[str]) -> str:
+    """DM participants other than self, or just self for a self-DM."""
+    me = (zulip_core.get_client().email or "").lower()
+    others = [e for e in emails if e.lower() != me]
+    return "DM with " + ", ".join(others or emails)
+
+
 @mcp.tool()
 def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                  before_message_id: Optional[int] = None,
                  message_id: Optional[int] = None,
                  dm_with: list[str] | None = None,
                  after: str = "", before: str = "") -> str:
-    """Get messages from a stream/topic or a DM, or fetch context around a message ID.
+    """Get messages from a stream/topic or a DM, or the messages up to a message ID.
 
     Accepts one of stream+topic, dm_with, or message_id:
     - stream+topic: fetch messages from that topic (with optional pagination)
     - dm_with: fetch the DM conversation with exactly these people
-    - message_id: auto-discover the conversation, fetch context around that message
-    - message_id with stream+topic or dm_with: anchor at message_id
+    - message_id: auto-discover the conversation, fetch messages up to and including it
+    - message_id with stream+topic or dm_with: end the page at message_id
 
     Args:
         stream: Stream/channel name (optional if message_id given).
         topic: Topic name (optional if message_id given).
         num_messages: Number of messages (default 20, max 100).
-        before_message_id: Get messages before this ID (for pagination).
-        message_id: Fetch context around this message ID.
+        before_message_id: Only messages older than this ID (for pagination).
+        message_id: Fetch messages up to and including this ID.
         dm_with: Emails of the other DM participants (yourself is implied).
         after: Only messages at or after this ISO 8601 date/datetime.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+).
@@ -896,57 +910,51 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
     if dm_with and (stream or topic):
         return "Error: Provide stream+topic or dm_with, not both."
 
-    if message_id and not dm_with and (not stream or not topic):
-        ctx = zulip_core.discover_message_context(message_id)
-        if ctx is not None:
-            stream, topic = ctx
-        else:
-            msg = zulip_core.get_message_by_id(message_id)
-            if not msg or msg.get("type") != "private":
-                return f"Message {message_id} not found or not accessible."
+    if message_id and not dm_with and not (stream and topic):
+        msg = zulip_core.get_message_by_id(message_id)
+        if not msg:
+            return f"Message {message_id} not found or not accessible."
+        if msg.get("type") == "private":
             stream, topic = "", ""
-            dm_with = zulip_core.dm_partner_emails(msg)
+            dm_with = [r["email"] for r in msg.get("display_recipient", []) if r.get("email")]
+        else:
+            stream, topic = msg.get("display_recipient", ""), msg.get("subject", "")
+            if not stream or not topic:
+                return f"Message {message_id} not found or not accessible."
 
-    if not dm_with:
+    if dm_with:
+        label = _dm_label(dm_with)
+    else:
         if not stream or not topic:
             return "Error: Provide stream+topic, dm_with, or message_id."
         err = _reject_if_private(stream)
         if err:
             return err
+        visibility = "private" if zulip_core.is_stream_private(stream) else "public"
+        label = f"[{visibility}] #{stream} > {topic}"
 
+    if before_message_id is None and message_id:
+        before_message_id = message_id + 1
     try:
-        after_dt = zulip_core._parse_datetime(after) if after else None
-        before_dt = zulip_core._parse_datetime(before) if before else None
+        after_dt, before_dt = _parse_bounds(after, before)
+        page = zulip_core.fetch_narrow(
+            zulip_core.build_narrow(stream=stream, topic=topic, dm_with=dm_with),
+            num_messages=num_messages, before_message_id=before_message_id,
+            after=after_dt, before=before_dt,
+        )
     except ValueError as e:
         return f"Error: {e}"
 
-    anchor_id = before_message_id or (message_id + 1 if message_id else None)
-    after_reached = False
-    if dm_with or after_dt or before_dt:
-        narrow = zulip_core.build_narrow(stream=stream, topic=topic, dm_with=dm_with)
-        try:
-            messages, after_reached = zulip_core.fetch_narrow(
-                narrow, num_messages=num_messages, before_message_id=anchor_id,
-                after=after_dt, before=before_dt,
-            )
-        except ValueError as e:
-            return f"Error: {e}"
-    else:
-        messages = zulip_core.get_topic_messages(
-            stream, topic, num_messages=num_messages, before_message_id=anchor_id,
-        )
-
-    if dm_with:
-        label = "DM with " + ", ".join(dm_with)
-    else:
-        visibility = "private" if zulip_core.is_stream_private(stream) else "public"
-        label = f"[{visibility}] #{stream} > {topic}"
     header = f"Messages from {label}:"
     if message_id:
-        header = f"History for {label} (around message {message_id}):"
-    if after_reached:
+        header = f"History for {label} (up to message {message_id}):"
+    if page.reached_after:
         header += f"\n(Reached after={after}; nothing older shown.)"
-    return header + "\n\n" + zulip_core.format_messages(messages)
+    elif page.older_than is not None:
+        header += f"\n(Older: before_message_id={page.older_than})"
+    else:
+        header += "\n(No older messages.)"
+    return header + "\n\n" + zulip_core.format_messages(page.messages)
 
 
 @mcp.tool()
@@ -981,26 +989,25 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
             return err
 
     try:
-        after_dt = zulip_core._parse_datetime(after) if after else None
-        before_dt = zulip_core._parse_datetime(before) if before else None
+        after_dt, before_dt = _parse_bounds(after, before)
         narrow = zulip_core.build_narrow(
             stream=stream, topic=topic, dm_with=dm_with, sender=sender, query=query,
         )
-        messages, after_reached = zulip_core.fetch_narrow(
+        page = zulip_core.fetch_narrow(
             narrow, num_messages=num_messages, before_message_id=before_message_id,
             after=after_dt, before=before_dt,
         )
     except ValueError as e:
         return f"Error: {e}"
 
-    messages = zulip_core.filter_for_bot(messages)
+    messages = zulip_core.filter_for_bot(page.messages)
     count = f"{len(messages)} result{'' if len(messages) == 1 else 's'}"
-    if after_reached:
+    if page.reached_after:
         status = f"{count}; reached after={after}"
-    elif messages:
-        status = f"{count}; older: before_message_id={messages[0]['id']}"
+    elif page.older_than is not None:
+        status = f"{count}; older: before_message_id={page.older_than}"
     else:
-        status = count
+        status = f"{count}; no older matches"
     header = f"Search as {zulip_core.get_client().email} ({status})"
     # combine=False: adjacent hits can come from different conversations.
     body = zulip_core.format_messages(messages, include_topic=True, combine=False)
