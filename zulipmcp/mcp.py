@@ -50,8 +50,8 @@ from . import core as zulip_core
 
 mcp = FastMCP("Zulip Messaging")
 
-# Tag every tool that writes to Zulip; apply_read_only() hides them. Tagging is
-# UX only: the read-only guarantee is core's refusal of non-GET requests.
+# Tag every tool that writes to Zulip; run_server() hides them in read-only
+# mode. Tagging is UX only; _ReadOnlyClient enforces.
 WRITE_TAG = "write"
 
 PRIVATE_STREAM_ERROR = (
@@ -1466,15 +1466,6 @@ def upload_file(file_path: str) -> str:
 # Server entry point
 # ============================================================================
 
-def apply_read_only(server: FastMCP) -> None:
-    """Hide every tool tagged ``WRITE_TAG`` from *server*.
-
-    Disabled tools are neither listed nor callable. This is UX only — the
-    read-only guarantee is the client-level refusal in ``core.get_client()``.
-    """
-    server.disable(tags={WRITE_TAG})
-
-
 def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
     """Start the MCP server.
 
@@ -1489,7 +1480,7 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     read_only = zulip_core.is_read_only()
     if read_only:
         _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")
-        apply_read_only(mcp)
+        mcp.disable(tags={WRITE_TAG})
 
     # Auto-init session from env vars when both are present.
     stream = os.environ.get("SESSION_STREAM", "").strip() or None

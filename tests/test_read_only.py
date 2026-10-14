@@ -1,11 +1,11 @@
 """Tests for ZULIPMCP_READ_ONLY.
 
 Contract: with read-only on, the client refuses every non-GET request before
-it reaches the HTTP layer (the guarantee), and the MCP server hides every
-write-tagged tool (UX only).
+it reaches the transport, and the MCP server hides every write-tagged tool.
 """
 import asyncio
 import importlib
+import json
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +13,7 @@ from typing import Any, Callable
 import pytest
 import requests
 import zulip
+from requests.adapters import HTTPAdapter
 from fastmcp import FastMCP
 
 from zulipmcp import core
@@ -67,51 +68,48 @@ _GET_ROUTES: dict[str, dict[str, Any]] = {
 }
 
 
-class _FakeResponse:
-    status_code = 200
-
-    def __init__(self, body: dict[str, Any]) -> None:
-        self._body = body
-
-    def json(self) -> dict[str, Any]:
-        return self._body
-
-
 @pytest.fixture
 def transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """Answer known GETs offline; fail loudly on any non-GET. Returns the request log."""
     requests_seen: list[tuple[str, str]] = []
 
-    def fake_request(self: requests.Session, method: str, url: str, **kwargs: Any) -> _FakeResponse:
+    def fake_send(self: HTTPAdapter, request: requests.PreparedRequest,
+                  *args: Any, **kwargs: Any) -> requests.Response:
+        method, url = request.method or "", request.url or ""
         path = urllib.parse.urlparse(url).path.replace("//", "/")
         route = path.removeprefix("/api/v1/")
         requests_seen.append((method, route))
-        if method.upper() != "GET":
-            raise AssertionError(f"non-GET reached the network: {method} {url}")
+        if method != "GET":
+            raise AssertionError(f"non-GET reached the transport: {method} {url}")
         if route not in _GET_ROUTES:
             raise AssertionError(f"unexpected GET: {url}")
-        return _FakeResponse({"result": "success", "msg": "", **_GET_ROUTES[route]})
+        response = requests.Response()
+        response.status_code = 200
+        response.url = url
+        response.request = request
+        response._content = json.dumps({"result": "success", "msg": "", **_GET_ROUTES[route]}).encode()
+        return response
 
     rc = tmp_path / "zuliprc"
     rc.write_text("[api]\nemail=bot@example.com\nkey=test-key\nsite=https://zulip.example.com\n")
     monkeypatch.setenv("ZULIP_RC_PATH", str(rc))
     monkeypatch.delenv("BOT_ALLOWED_WRITE_STREAMS", raising=False)
     monkeypatch.delenv("BOT_ALLOWED_PRIVATE_STREAMS", raising=False)
-    monkeypatch.setattr(requests.Session, "request", fake_request)
+    monkeypatch.setattr(HTTPAdapter, "send", fake_send)
     monkeypatch.setattr(core, "_client", None)
     monkeypatch.setenv("ZULIPMCP_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(core, "_stream_id_cache", {})
     return requests_seen
 
 
-@pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", " true "])
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "On", " true "])
 def test_read_only_enabled_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("ZULIPMCP_READ_ONLY", value)
 
     assert core.is_read_only()
 
 
-@pytest.mark.parametrize("value", ["", "0", "false", "yes", "on", "2"])
+@pytest.mark.parametrize("value", ["", "  ", "0", "false", "No", "OFF"])
 def test_read_only_disabled_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("ZULIPMCP_READ_ONLY", value)
 
@@ -122,6 +120,26 @@ def test_read_only_unset_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ZULIPMCP_READ_ONLY", raising=False)
 
     assert not core.is_read_only()
+
+
+@pytest.mark.parametrize("value", ["2", "ture", "enabled", "1 true"])
+def test_read_only_unrecognized_value_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, value: str,
+) -> None:
+    monkeypatch.setenv("ZULIPMCP_READ_ONLY", value)
+
+    with pytest.raises(ValueError, match="Invalid ZULIPMCP_READ_ONLY"):
+        core.is_read_only()
+
+
+def test_run_server_rejects_unrecognized_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ZULIPMCP_READ_ONLY", "ture")
+    ran: list[dict] = []
+    monkeypatch.setattr(mcp.mcp, "run", lambda **kwargs: ran.append(kwargs))
+
+    with pytest.raises(ValueError, match="Invalid ZULIPMCP_READ_ONLY"):
+        mcp.run_server()
+    assert ran == []
 
 
 def _upload(tmp_path: Path) -> object:
@@ -150,35 +168,41 @@ def test_read_only_blocks_writes_before_network(
 ) -> None:
     monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1")
 
-    with pytest.raises(core.ReadOnlyError, match=r"refusing (POST|PATCH) v1/"):
+    with pytest.raises(core.ReadOnlyError, match=r"refusing (POST|PATCH) https://zulip\.example\.com/api/v1/"):
         write(tmp_path)
 
     assert transport
     assert all(method == "GET" for method, _ in transport)
 
 
-def test_read_only_get_delegates_to_parent(
+def test_read_only_get_reaches_transport(
     transport: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1")
     client = core.get_client()
     assert isinstance(client, core._ReadOnlyClient)
 
-    calls: list[tuple[str, str]] = []
-
-    def parent(self: zulip.Client, orig_request: Any, url: str, method: str = "POST", **kwargs: Any) -> dict:
-        calls.append((method, url))
-        return {"result": "success"}
-
-    monkeypatch.setattr(zulip.Client, "do_api_query", parent)
-
-    assert client.call_endpoint(url="messages", method="GET") == {"result": "success"}
-    assert client.call_endpoint(url="messages", method="get") == {"result": "success"}
-    assert calls == [("GET", "v1/messages"), ("get", "v1/messages")]
+    assert client.call_endpoint(url="messages", method="GET")["result"] == "success"
+    assert client.call_endpoint(url="messages", method="get")["result"] == "success"
+    assert transport[-2:] == [("GET", "messages"), ("GET", "messages")]
 
     with pytest.raises(core.ReadOnlyError):
         client.call_endpoint(url="messages", method="post")
-    assert len(calls) == 2
+    assert all(method == "GET" for method, _ in transport)
+
+
+@pytest.mark.parametrize("verb", ["post", "put", "patch", "delete", "head"])
+def test_read_only_direct_session_use_is_blocked(
+    transport: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch, verb: str,
+) -> None:
+    monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1")
+    client = core.get_client()
+    client.ensure_session()
+    assert client.session is not None
+
+    with pytest.raises(core.ReadOnlyError, match=f"refusing {verb.upper()} "):
+        getattr(client.session, verb)("https://zulip.example.com/api/v1/messages")
+    assert all(method == "GET" for method, _ in transport)
 
 
 def test_read_only_off_uses_plain_client(
@@ -189,25 +213,25 @@ def test_read_only_off_uses_plain_client(
     assert type(core.get_client()) is zulip.Client
 
 
-def _tool_names(apply_read_only: bool) -> set[str]:
+def _tool_names(read_only: bool) -> set[str]:
     """List tools on a copy of the server so the module-level instance is untouched."""
     async def names() -> set[str]:
         server = FastMCP("test")
         for tool in await mcp.mcp.list_tools():
             server.add_tool(tool)
-        if apply_read_only:
-            mcp.apply_read_only(server)
+        if read_only:
+            server.disable(tags={mcp.WRITE_TAG})
         return {tool.name for tool in await server.list_tools()}
 
     return asyncio.run(names())
 
 
 def test_read_only_exposes_only_read_tools() -> None:
-    assert _tool_names(apply_read_only=True) == READ_TOOLS
+    assert _tool_names(read_only=True) == READ_TOOLS
 
 
 def test_all_tools_present_without_read_only() -> None:
-    assert _tool_names(apply_read_only=False) == READ_TOOLS | WRITE_TOOLS
+    assert _tool_names(read_only=False) == READ_TOOLS | WRITE_TOOLS
 
 
 @pytest.mark.parametrize("read_only", [True, False])
@@ -215,13 +239,13 @@ def test_run_server_read_only_wiring(monkeypatch: pytest.MonkeyPatch, read_only:
     monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1" if read_only else "0")
     monkeypatch.setenv("SESSION_STREAM", "general")
     monkeypatch.setenv("SESSION_TOPIC", "t")
-    hidden: list[FastMCP] = []
+    disabled: list[dict] = []
     inits: list[tuple[str, str]] = []
-    monkeypatch.setattr(mcp, "apply_read_only", hidden.append)
+    monkeypatch.setattr(mcp.mcp, "disable", lambda **kwargs: disabled.append(kwargs))
     monkeypatch.setattr(mcp, "_init_session", lambda s, t, num_messages=0: inits.append((s, t)) or "ok")
     monkeypatch.setattr(mcp.mcp, "run", lambda **kwargs: None)
 
     mcp.run_server()
 
-    assert hidden == ([mcp.mcp] if read_only else [])
+    assert disabled == ([{"tags": {mcp.WRITE_TAG}}] if read_only else [])
     assert inits == ([] if read_only else [("general", "t")])

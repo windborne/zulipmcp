@@ -9,11 +9,12 @@ import urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from typing import IO, Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Optional
 
 import diskcache
 import requests
 import zulip
+from requests.adapters import HTTPAdapter
 
 _DEFAULT_TIMEZONE = "America/Los_Angeles"
 
@@ -432,29 +433,47 @@ class ReadOnlyError(PermissionError):
     """Raised when a write is attempted while ``ZULIPMCP_READ_ONLY`` is on."""
 
 
+def _env_flag(name: str, on: tuple[str, ...], off: tuple[str, ...]) -> bool:
+    """Parse a boolean env var; unrecognized values raise ValueError."""
+    raw = os.environ.get(name, "")
+    value = raw.strip().lower()
+    if value in on:
+        return True
+    if value in off:
+        return False
+    allowed = ", ".join(v for v in on + off if v)
+    raise ValueError(f"Invalid {name}={raw!r}; use one of {allowed}, or leave it unset")
+
+
 def is_read_only() -> bool:
-    """Whether ``ZULIPMCP_READ_ONLY`` is set to ``1`` or ``true``."""
-    return os.environ.get("ZULIPMCP_READ_ONLY", "").strip().lower() in ("1", "true")
+    """Whether ``ZULIPMCP_READ_ONLY`` is on. Raises ValueError on unrecognized values."""
+    return _env_flag("ZULIPMCP_READ_ONLY", on=("1", "true", "yes", "on"),
+                     off=("", "0", "false", "no", "off"))
+
+
+class _ReadOnlyAdapter(HTTPAdapter):
+    """Transport adapter that refuses every non-GET request before sending it."""
+
+    def send(self, request: requests.PreparedRequest, *args: Any, **kwargs: Any) -> requests.Response:
+        if request.method != "GET":
+            raise ReadOnlyError(f"ZULIPMCP_READ_ONLY is set; refusing {request.method} {request.url}")
+        return super().send(request, *args, **kwargs)
 
 
 class _ReadOnlyClient(zulip.Client):
-    """Client that refuses every non-GET request before it reaches the network."""
+    """Client whose HTTP session refuses every non-GET request.
 
-    def do_api_query(
-        self,
-        orig_request: Mapping[str, Any],
-        url: str,
-        method: str = "POST",
-        longpolling: bool = False,
-        files: Optional[List[IO[Any]]] = None,
-        timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        if method.upper() != "GET":
-            raise ReadOnlyError(f"ZULIPMCP_READ_ONLY is set; refusing {method} {url}")
-        return super().do_api_query(
-            orig_request, url, method=method, longpolling=longpolling,
-            files=files, timeout=timeout,
-        )
+    The guard sits on the session's transport adapters, so it covers both
+    API calls and direct ``client.session`` use.
+    """
+
+    def ensure_session(self) -> None:
+        if self.session:
+            return
+        super().ensure_session()
+        assert self.session is not None
+        for prefix in ("https://", "http://"):
+            self.session.mount(prefix, _ReadOnlyAdapter())
 
 
 def get_client() -> zulip.Client:
