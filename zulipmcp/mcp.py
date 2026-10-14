@@ -1431,6 +1431,8 @@ def fetch_image(path: str) -> str:
 def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     """Fetch a file uploaded to Zulip and save it locally.
 
+    Access to an upload is by its path token; the stream allowlist isn't checked.
+
     Args:
         path: Upload path from message content (e.g. "/user_uploads/...").
         save_dir: Directory to save to. Uses temp dir if not provided.

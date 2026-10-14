@@ -40,6 +40,12 @@ def session(monkeypatch: pytest.MonkeyPatch) -> FakeSession:
     "/user_uploads/2/ab/payload.txt#frag",
     "/user_uploads/../api/v1/messages",
     "/user_uploads/2/%2e%2e/%2E%2E/api/v1/messages",
+    "/user_uploads/..%2F..%2Fapi/v1/messages/1",
+    "/user_uploads/2/ab%2fcd/file.txt",
+    "/user_uploads/2/ab%5Ccd/file.txt",
+    "/user_uploads/2/ab\\cd/file.txt",
+    "/user_uploads/%2e%2e/api/v1/messages",
+    "/user_uploads/2/./ab/file.txt",
     "https://other.example.com/user_uploads/2/ab/file.txt",
     "//other.example.com/user_uploads/2/ab/file.txt",
     "user_uploads/2/ab/file.txt",
@@ -69,6 +75,12 @@ def test_saves_basename_into_save_dir(session: FakeSession, tmp_path: Path) -> N
     assert Path(saved).read_bytes() == b"payload"
     assert (size, content_type) == (7, "image/png")
     assert session.urls == [f"{SITE}/user_uploads/2/ab/report.pdf"]
+
+
+def test_accepts_encoded_filename(session: FakeSession, tmp_path: Path) -> None:
+    core.save_file("/user_uploads/2/ab/tok/my%20file.png", save_dir=str(tmp_path))
+
+    assert session.urls == [f"{SITE}/user_uploads/2/ab/tok/my%20file.png"]
 
 
 def test_saves_into_fresh_temp_dir_by_default(session: FakeSession) -> None:

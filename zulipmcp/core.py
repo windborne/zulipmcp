@@ -1607,11 +1607,18 @@ def _upload_path(path: str) -> str:
     proxy that bypasses the private-stream allowlist and bot filtering.
     """
     parts = urllib.parse.urlsplit(path)
-    segments = parts.path.split("/")
+    raw = path.lower()
+    decoded = urllib.parse.unquote(parts.path)
+    # requests sends %2F and %5C as-is and the web server decodes them into
+    # separators, so ``..%2F`` would escape /user_uploads/ after this check.
     if (parts.scheme or parts.netloc or parts.query or parts.fragment
             or not parts.path.startswith("/user_uploads/")
-            or any(urllib.parse.unquote(seg) == ".." for seg in segments)):
-        raise ValueError(f"Only /user_uploads/ paths without a query or '..' can be fetched: {path!r}")
+            or "%2f" in raw or "%5c" in raw or "\\" in raw or "\\" in decoded
+            or any(seg in (".", "..") for seg in decoded.split("/"))):
+        raise ValueError(
+            f"Only /user_uploads/ paths without a query, dot segments, or encoded "
+            f"separators can be fetched: {path!r}"
+        )
     return parts.path
 
 
@@ -1626,6 +1633,7 @@ def _upload_filename(path: str) -> str:
 def download_file(path: str) -> tuple[bytes, str]:
     """Download a ``/user_uploads/`` file from Zulip. Returns (content_bytes, content_type).
 
+    Access to an upload is by its path token; the stream allowlist isn't checked.
     Raises ValueError for other paths and on any download error.
     """
     path = _upload_path(path)
