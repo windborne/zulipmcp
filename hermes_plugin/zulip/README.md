@@ -63,7 +63,7 @@ owned by the gateway:
 mcp_servers:
   zulip:
     command: /home/you/.hermes/hermes-agent/venv/bin/python
-    args: ["-m", "zulipmcp.mcp"]
+    args: ["-m", "zulipmcp"]
     env:
       ZULIP_RC_PATH: ${ZULIP_RC_PATH}
       BOT_ALLOWED_PRIVATE_STREAMS: "__ALL__"
@@ -86,7 +86,8 @@ platform_toolsets:
 ```
 
 Replace `__ALL__` with comma-separated stream names to narrow the MCP tool
-policy.
+policy. `__ALL__` also lets the agent read the bot's DMs and search everything
+it received; list streams instead to keep DMs closed.
 
 ## Verify
 

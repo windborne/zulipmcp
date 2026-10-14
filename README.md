@@ -12,7 +12,7 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 1. Install the package:
 
    ```bash
-   uv add zulipmcp --git https://github.com/windborne/zulipmcp.git
+   uv add git+https://github.com/windborne/zulipmcp.git
    ```
 
 2. Add a `.zuliprc` file to your project root with your Zulip bot credentials. See [Add a bot or integration](https://zulip.com/help/add-a-bot-or-integration) for instructions on making a bot. The bot type must be "generic."
@@ -24,7 +24,7 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
      "mcpServers": {
        "zulip": {
          "command": "uv",
-         "args": ["run", "python", "-m", "zulipmcp.mcp"]
+         "args": ["run", "python", "-m", "zulipmcp"]
        }
      }
    }
@@ -32,9 +32,43 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 
 4. Restart your MCP client. The Zulip tools should now be available.
 
+### Read as yourself, post as a bot
+
+A bot can't read private channels it isn't in or DMs it isn't part of. To let an agent read everything you can see while it still posts as the bot, run two servers: one on the bot's zuliprc, and a read-only one on a zuliprc holding your personal [API key](https://zulip.com/api/api-keys). Installing the `zulipmcp` command once keeps launches from re-resolving dependencies:
+
+```bash
+uv tool install git+https://github.com/windborne/zulipmcp.git   # update later with: uv tool upgrade zulipmcp
+```
+
+`uv tool install` ignores the lockfile; append `@<tag-or-commit>` to the URL to pin a version.
+
+Desktop MCP clients often don't inherit your shell's `PATH`; if `zulipmcp` isn't found, use the absolute path under `uv tool dir --bin`.
+
+```json
+{
+  "mcpServers": {
+    "zulip": {
+      "command": "zulipmcp",
+      "env": {"ZULIP_RC_PATH": "/path/to/bot.zuliprc"}
+    },
+    "zulip-personal": {
+      "command": "zulipmcp",
+      "env": {
+        "ZULIP_RC_PATH": "/path/to/personal.zuliprc",
+        "ZULIPMCP_READ_ONLY": "1",
+        "BOT_ALLOWED_PRIVATE_STREAMS": "__ALL__"
+      }
+    }
+  }
+}
+```
+
+`__ALL__` lets that server read DMs and search everything the account received. Read-only mode constrains this server, not an agent that can read the personal zuliprc file itself.
+
 ## Requirements
 
 - Python >=3.10, managed with [uv](https://docs.astral.sh/uv/)
+- Zulip Server 9.0+ (`before` date bounds need 12.0+)
 - A `.zuliprc` file for Zulip API auth (see [Quickstart](#quickstart))
 - For listener mode: the selected backend CLI installed and authenticated (`claude` by default, `codex` with `--backend codex`, or `opencode` with `--backend opencode`)
 
@@ -42,8 +76,8 @@ Run AI agents in Zulip as @mentionable bots — or wire into any [MCP](https://m
 
 | Entry Point | Description |
 |---|---|
-| `uv run python -m zulipmcp.mcp` | MCP server for Claude Code, Codex, and other MCP clients |
-| `uv run python -m zulipmcp.mcp --transport sse` | MCP server over SSE (for remote/web clients) |
+| `uv run python -m zulipmcp` (or `zulipmcp` after `uv tool install`) | MCP server for Claude Code, Codex, and other MCP clients |
+| `uv run python -m zulipmcp --transport sse` | MCP server over SSE (for remote/web clients) |
 | `uv run python -m zulipmcp.launch_agent` | Launch one MCP-backed coding session without a listener |
 | `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns agent sessions |
 
@@ -54,9 +88,9 @@ zulipmcp can also be imported directly as a Python library:
 ```python
 import zulipmcp
 
-# Fetch and format recent messages
-messages = zulipmcp.get_messages(hours_back=24, channels=["engineering"])
-print(zulipmcp.format_messages(messages))
+# Fetch and format the latest page of a channel
+page = zulipmcp.fetch_narrow(zulipmcp.build_narrow(stream="engineering"))
+print(zulipmcp.format_messages(page.messages))
 
 # Send a message
 zulipmcp.send_message("engineering", "general", "Hello from Python!")
@@ -202,6 +236,10 @@ Users can dismiss a bot session by reacting with a configurable emoji (default: 
 
 The typing indicator starts on `set_context()` and after every `reply()`, and stops on `listen()` and `end_session()`, so users see the bot as "typing" while it works. If another process drives the indicator, `configure(auto_typing_start=False)` suppresses the automatic starts so they cannot overwrite it; the stops still run, since clearing the indicator on idle and exit is right whoever set it, and `reply()` sends a stop in place of its start so the status shown while composing does not outlive the message. The explicit `typing()` / `stop_typing()` tools are unaffected.
 
+### Reading history and search
+
+`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search over a `stream`, everything this account received (`scope="received"`), or all public channels (`scope="public"`, the default without `__ALL__`). Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+).
+
 ### Bot visibility filtering
 
 Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages starting with `/nobots` or `/nb` are also filtered out. This lets humans have private conversations the bot won't see.
@@ -215,15 +253,16 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | Variable | Description |
 |---|---|
 | `ZULIP_RC_PATH` | Absolute path to `.zuliprc` for direct MCP server or Hermes gateway use. Listener mode sets this for spawned sessions from `--zuliprc`; it does not read ambient `ZULIP_RC_PATH` as its own default. |
-| `ZULIPMCP_TIMEZONE` | IANA timezone used to display message timestamps, such as `Europe/London` or `Asia/Tokyo`. Defaults to `America/Los_Angeles`. |
+| `ZULIPMCP_TIMEZONE` | IANA timezone used to display message timestamps and to interpret date-only and naive `after`/`before` values, such as `Europe/London` or `Asia/Tokyo`. Defaults to `America/Los_Angeles`. |
 | `ZULIP_MAX_MESSAGE_LENGTH` | Char limit above which send tools return an error instead of letting Zulip silently truncate. Defaults to `10000` (Zulip's default); set for realms with a custom cap. |
 | `TRIGGER_MESSAGE_ID` | Message ID that triggered the session (e.g. the @mention). Sets the listen anchor so the agent doesn't miss messages after the trigger. |
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
 | `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only -- the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
-| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. |
+| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. Without `__ALL__`, reads must name an allowed stream or public channels, and DMs are refused; with it, `search_messages` defaults to `scope="received"`. |
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
-| `ZULIPMCP_CACHE_DIR` | Override the disk cache directory (defaults to system temp dir). |
+| `ZULIPMCP_READ_ONLY` | `1`/`true`/`yes`/`on`: the client refuses every non-GET request, and write and session tools are hidden. Unset, empty or `0`/`false`/`no`/`off` = off; anything else is a startup error. See [Read as yourself, post as a bot](#read-as-yourself-post-as-a-bot). |
+| `ZULIPMCP_CACHE_DIR` | Override the disk cache base directory (defaults to system temp dir). Each site and account gets its own subdirectory, so servers running as different users never share cached data. |
 | `ZULIPMCP_LOG_DIR` | Override the log directory (defaults to `/tmp/zulipmcp_logs`). |
 | `ZULIPMCP_MARKDOWN_AUTOFIX` | Disables all outgoing markdown normalization (blank-line-before-table injection and bold/link rewrites) when set to `0` or `false`. Defaults to enabled. |
 

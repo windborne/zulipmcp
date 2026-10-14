@@ -1,17 +1,20 @@
+import functools
+import hashlib
 import os
 import re
-import time
 import tempfile
 import json
+import math
 import urllib.parse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from typing import Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import diskcache
 import requests
 import zulip
+from requests.adapters import HTTPAdapter
 
 _DEFAULT_TIMEZONE = "America/Los_Angeles"
 
@@ -30,8 +33,6 @@ def _load_timezone() -> ZoneInfo:
 TIMEZONE = _load_timezone()
 
 _client: Optional[zulip.Client] = None
-_cache = diskcache.Cache(os.environ.get("ZULIPMCP_CACHE_DIR",
-    Path(tempfile.gettempdir()) / "zulipmcp_cache"))
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
 _dismiss_emoji: set[str] = {"stop_sign"}
@@ -248,6 +249,25 @@ def is_private_stream_allowed(stream_name: str) -> bool:
     return stream_name.lower() in allowed
 
 
+def dm_reads_allowed() -> bool:
+    """Whether DMs may be read: only under ``BOT_ALLOWED_PRIVATE_STREAMS=__ALL__``.
+
+    An explicit stream list never unlocks DMs, which on a shared bot belong
+    to every user who has messaged it.
+    """
+    return _ALL_PRIVATE_STREAMS in _allowed_private_streams()
+
+
+def allowlisted_private_streams() -> list[str]:
+    """Sorted names in an explicit ``BOT_ALLOWED_PRIVATE_STREAMS`` list; empty when unset or ``__ALL__``."""
+    allowed = _allowed_private_streams()
+    return [] if _ALL_PRIVATE_STREAMS in allowed else sorted(allowed)
+
+
+PRIVATE_STREAM_DENIED = "Private stream access denied: not in BOT_ALLOWED_PRIVATE_STREAMS."
+DM_READS_DENIED = "Reading DMs requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
+
+
 def is_stream_write_allowed(stream_name: str) -> bool:
     """Whether the current process is allowed to send to this stream."""
     allowed = _allowed_write_streams()
@@ -258,7 +278,7 @@ def is_stream_write_allowed(stream_name: str) -> bool:
 
 def _stream_write_error(stream: str) -> Optional[dict]:
     """Return an API-style error dict if writes to this stream are forbidden."""
-    if is_stream_private(stream) and not is_private_stream_allowed(stream):
+    if not is_private_stream_allowed(stream):
         return {"result": "error", "msg": f"Private stream access denied: {stream}"}
     if not is_stream_write_allowed(stream):
         return {"result": "error", "msg": f"Stream write access denied: {stream}"}
@@ -282,7 +302,7 @@ def _get_stream_message_for_write(message_id: int) -> tuple[Optional[dict], Opti
 
 
 def set_ignored_streams(streams: set[str]) -> None:
-    """Set streams to exclude from all message fetches."""
+    """Set streams to exclude from message fetches; fetch_narrow keeps them when its narrow names a channel."""
     global _ignored_streams
     _ignored_streams = {s.lower() for s in streams}
 
@@ -392,7 +412,7 @@ def check_dismissed(message_id: int, bot_user_id: int) -> Optional[str]:
 def is_stream_private(stream_name: str) -> bool:
     """Check if a stream is private (invite_only). Cached for 1 hour."""
     cache_key = ("is_stream_private", stream_name.lower())
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     if cached is not None:
         return cached
 
@@ -403,11 +423,68 @@ def is_stream_private(stream_name: str) -> bool:
 
     for s in result.get("streams", []):
         is_private = s.get("invite_only", False)
-        _cache.set(("is_stream_private", s["name"].lower()), is_private, expire=3600)
+        _get_cache().set(("is_stream_private", s["name"].lower()), is_private, expire=3600)
 
     # Re-check cache after populating
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     return cached if cached is not None else True  # not in results — must be private
+
+
+@functools.cache
+def _open_cache(directory: Path) -> diskcache.Cache:
+    return diskcache.Cache(directory)
+
+
+def _get_cache() -> diskcache.Cache:
+    """Disk cache scoped to the current client's site and account.
+
+    Cache keys carry no identity, so processes authenticated as different
+    users must not share a directory.
+    """
+    client = get_client()
+    site = getattr(client, "base_url", "")
+    identity = hashlib.sha256(f"{site}|{client.email}".encode()).hexdigest()[:16]
+    base = os.environ.get("ZULIPMCP_CACHE_DIR") or Path(tempfile.gettempdir()) / "zulipmcp_cache"
+    return _open_cache(Path(base) / identity)
+
+
+class ReadOnlyError(PermissionError):
+    """Raised when a write is attempted while ``ZULIPMCP_READ_ONLY`` is on."""
+
+
+def is_read_only() -> bool:
+    """Whether ``ZULIPMCP_READ_ONLY`` is on. Raises ValueError on unrecognized values."""
+    raw = os.environ.get("ZULIPMCP_READ_ONLY", "")
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("", "0", "false", "no", "off"):
+        return False
+    raise ValueError(
+        f"Invalid ZULIPMCP_READ_ONLY={raw!r}; use one of 1, true, yes, on, 0, false, no, off, "
+        f"or leave it unset"
+    )
+
+
+class _ReadOnlyAdapter(HTTPAdapter):
+    """Refuses every non-GET at the transport, beneath API calls, raw ``session.*`` and redirects."""
+
+    def send(self, request: requests.PreparedRequest, *args: Any, **kwargs: Any) -> requests.Response:
+        if request.method != "GET":
+            raise ReadOnlyError(f"ZULIPMCP_READ_ONLY is set; refusing {request.method} {request.url}")
+        return super().send(request, *args, **kwargs)
+
+
+class _ReadOnlyClient(zulip.Client):
+    """Mounts :class:`_ReadOnlyAdapter` on both schemes so every session request passes through it."""
+
+    def ensure_session(self) -> None:
+        if self.session:
+            return
+        super().ensure_session()
+        assert self.session is not None
+        for prefix in ("https://", "http://"):
+            self.session.mount(prefix, _ReadOnlyAdapter())
 
 
 def get_client() -> zulip.Client:
@@ -416,6 +493,9 @@ def get_client() -> zulip.Client:
     Config resolution order:
         1. ZULIP_RC_PATH environment variable (absolute path to zuliprc)
         2. .zuliprc in the current working directory
+
+    With ``ZULIPMCP_READ_ONLY`` on, the client raises :class:`ReadOnlyError`
+    for every non-GET request.
     """
     global _client
     if _client is None:
@@ -431,10 +511,20 @@ def get_client() -> zulip.Client:
                 f"zuliprc not found at: {config_path}\n"
                 f"Set ZULIP_RC_PATH env var or place .zuliprc in the working directory."
             )
-        _client = zulip.Client(config_file=str(config_path))
+        client_class = _ReadOnlyClient if is_read_only() else zulip.Client
+        client = client_class(config_file=str(config_path))
+        if isinstance(client, _ReadOnlyClient):
+            # Fail closed if a zulip release builds its session in a way
+            # that skips ensure_session() and so the guard.
+            client.ensure_session()
+            session = client.session
+            if session is None or not isinstance(session.get_adapter(client.base_url), _ReadOnlyAdapter):
+                raise RuntimeError("ZULIPMCP_READ_ONLY is set but the client session is unguarded")
+        _client = client
         # Log identity so it's visible in MCP startup output
         email = _client.email or "unknown"
-        print(f"[zulipmcp] Zulip client initialized as: {email} (from {config_path})", file=sys.stderr)
+        mode = " [read-only]" if isinstance(_client, _ReadOnlyClient) else ""
+        print(f"[zulipmcp] Zulip client initialized as: {email} (from {config_path}){mode}", file=sys.stderr)
     return _client
 
 
@@ -542,118 +632,14 @@ def _time_attr(msg: dict, prev_timestamp: Optional[int]) -> str:
     return ""
 
 
-def get_messages(hours_back: int = 24, channels: Optional[list[str]] = None,
-                 sender: Optional[str] = None,
-                 as_of: Optional[datetime] = None) -> list[dict]:
-    """General-purpose paginated fetch returning raw message dicts sorted by ID.
-
-    channels=None → all public streams
-    channels=["eng", "ops"] → specific streams
-    sender="John Dean" → auto-resolves name to email, filters by sender
-    as_of=datetime(2025,6,1) → treat this as "now" (fetch hours_back before it)
-    """
-    cache_key = ("get_messages", hours_back, tuple(channels) if channels else None,
-                 sender, as_of.isoformat() if as_of else None)
-    cached = _cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    client = get_client()
-    anchor_time = int(as_of.timestamp()) if as_of else int(time.time())
-    cutoff = anchor_time - (hours_back * 3600)
-
-    narrow = []
-    if channels is None:
-        narrow.append({"operator": "channels", "operand": "public"})
-    # If specific channels given, we fetch per-channel and merge
-    if sender:
-        email = get_user_email(sender)
-        if not email:
-            return []
-        narrow.append({"operator": "sender", "operand": email})
-
-    if channels is not None:
-        # Fetch from each channel separately and merge
-        all_messages = []
-        for channel in channels:
-            channel_narrow = narrow + [{"operator": "channel", "operand": channel}]
-            msgs = _paginated_fetch(client, channel_narrow, cutoff, anchor_time)
-            all_messages.extend(msgs)
-        # Deduplicate by id and sort
-        seen = set()
-        unique = []
-        for m in all_messages:
-            if m["id"] not in seen:
-                seen.add(m["id"])
-                unique.append(m)
-        unique.sort(key=lambda m: m["id"])
-        _cache.set(cache_key, unique, expire=600)
-        return unique
-    else:
-        result = _paginated_fetch(client, narrow, cutoff, anchor_time)
-        _cache.set(cache_key, result, expire=600)
-        return result
-
-
-def _paginated_fetch(client: zulip.Client, narrow: list[dict],
-                     cutoff: int, upper_bound: Optional[int] = None) -> list[dict]:
-    """Paginate backward from newest in batches of 500 until time cutoff."""
-    cache_key = ("_paginated_fetch", tuple(tuple(d.items()) for d in narrow), cutoff, upper_bound)
-    cached = _cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    all_messages = []
-    anchor = "newest"
-    while True:
-        result = client.get_messages({
-            "anchor": anchor,
-            "num_before": 500,
-            "num_after": 0,
-            "narrow": narrow,
-            "apply_markdown": False,
-        })
-        if result["result"] != "success":
-            break
-        batch = result["messages"]
-        if not batch:
-            break
-
-        found_old = False
-        for msg in batch:
-            if upper_bound and msg["timestamp"] > upper_bound:
-                continue
-            if msg["timestamp"] >= cutoff:
-                all_messages.append(msg)
-            else:
-                found_old = True
-
-        if found_old:
-            break
-
-        # Move anchor to oldest message in this batch
-        anchor = batch[0]["id"]
-        # If we got fewer than requested, we've hit the beginning
-        if len(batch) < 500:
-            break
-
-    all_messages.sort(key=lambda m: m["id"])
-    if _ignored_streams:
-        all_messages = [
-            m for m in all_messages
-            if m.get("display_recipient", "").lower() not in _ignored_streams
-        ]
-    _cache.set(cache_key, all_messages, expire=600)
-    return all_messages
-
-
 def format_messages(messages: list[dict], include_topic: bool = False,
                     combine: bool = True) -> str:
     """Format messages as XML <msg> tags.
 
     combine=True merges consecutive messages from same user within 2 min.
     Smart timestamps: date shown only when it changes, time shown on 5+ min gaps.
-    include_topic=True adds stream and topic attributes to each <msg> tag.
+    include_topic=True adds stream and topic attributes to each <msg> tag, or
+    a dm attribute listing participant emails for DMs.
 
     Note: Messages in /nobots or /nb topics or starting with /nobots or /nb are automatically
     filtered out and will not be shown to the bot.
@@ -689,6 +675,9 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'stream="{stream_name}"')
             attrs.append(f'visibility="{visibility}"')
             attrs.append(f'topic="{msg.get("subject", "")}"')
+        elif include_topic and msg.get("type") == "private":
+            emails = ", ".join(r.get("email", "") for r in msg.get("display_recipient", []))
+            attrs.append(f'dm="{emails}"')
         attrs.append(f'id="{msg_id}"')
 
         # Add reaction summary as attribute if present
@@ -730,132 +719,6 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
 
     combined.append(current)
     return combined
-
-
-def _context_window(messages: list[dict], sender_email: str) -> list[dict]:
-    """Keep messages around where sender participated.
-
-    Before each user message: 3 messages OR 10 min (whichever captures more).
-    After each user message: 3 messages OR (2 hours AND <10 messages).
-    """
-    if not messages:
-        return []
-
-    include = set()
-    sender_indices = [i for i, m in enumerate(messages)
-                      if m.get("sender_email") == sender_email]
-
-    for idx in sender_indices:
-        include.add(idx)
-        ts = messages[idx]["timestamp"]
-
-        # Before: 3 messages or 10 min
-        for i in range(idx - 1, -1, -1):
-            if (idx - i) <= 3 or (ts - messages[i]["timestamp"]) <= 600:
-                include.add(i)
-            else:
-                break
-
-        # After: 3 messages or (2hr and <10 messages)
-        for i in range(idx + 1, len(messages)):
-            dist = i - idx
-            if dist <= 3 or (messages[i]["timestamp"] - ts <= 7200 and dist < 10):
-                include.add(i)
-            else:
-                break
-
-    return [messages[i] for i in sorted(include)]
-
-
-def format_topics(messages: list[dict], combine: bool = True) -> str:
-    """Group messages by stream>topic, format each group.
-
-    Topics sorted by last message ID. Groups separated by ---.
-    """
-    if not messages:
-        return ""
-
-    # Group by (stream, topic)
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for msg in messages:
-        stream = msg.get("display_recipient", "unknown")
-        topic = msg.get("subject", "unknown")
-        key = (stream, topic)
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(msg)
-
-    # Sort groups by last message ID
-    sorted_groups = sorted(groups.items(), key=lambda item: item[1][-1]["id"])
-
-    sections = []
-    for (stream, topic), group_msgs in sorted_groups:
-        visibility = "[private]" if is_stream_private(stream) else "[public]"
-        header = f"Stream: {visibility} {stream}, Topic: {topic}"
-        body = format_messages(group_msgs, include_topic=False, combine=combine)
-        sections.append(f"{header}\n{body}")
-
-    return "\n---\n".join(sections)
-
-
-def get_messages_formatted(hours_back: int = 24, channels: Optional[list[str]] = None,
-                           sender: Optional[str] = None,
-                           group_by_topic: bool = True,
-                           as_of: Optional[datetime] = None) -> str:
-    """Convenience: fetch + format in one call.
-
-    When sender is set with group_by_topic=True, fetches full conversation
-    context around the sender's messages in each topic they participated in.
-    as_of=datetime(2025,6,1) → treat this as "now" (fetch hours_back before it)
-    """
-    if sender and group_by_topic:
-        return _get_sender_conversations(hours_back, channels, sender, as_of)
-
-    messages = get_messages(hours_back=hours_back, channels=channels, sender=sender, as_of=as_of)
-    if not messages:
-        return "No messages found."
-    if group_by_topic:
-        return format_topics(messages)
-    else:
-        return format_messages(messages, include_topic=True)
-
-
-def _get_sender_conversations(hours_back: int, channels: Optional[list[str]],
-                              sender: str, as_of: Optional[datetime] = None) -> str:
-    """Two-pass fetch: find sender's topics, then get full context."""
-    client = get_client()
-    email = get_user_email(sender)
-    if not email:
-        return "No messages found."
-
-    # Pass 1: get sender's messages to discover topics
-    sender_messages = get_messages(hours_back=hours_back, channels=channels, sender=sender, as_of=as_of)
-    if not sender_messages:
-        return "No messages found."
-
-    # Extract unique (stream, topic) pairs
-    topics = set()
-    for msg in sender_messages:
-        if msg.get("type") == "stream":
-            topics.add((msg["display_recipient"], msg["subject"]))
-
-    # Pass 2: fetch all messages from each topic, apply context window
-    anchor_time = int(as_of.timestamp()) if as_of else int(time.time())
-    cutoff = anchor_time - (hours_back * 3600)
-    all_context_messages = []
-    for stream, topic in topics:
-        narrow = [
-            {"operator": "channel", "operand": stream},
-            {"operator": "topic", "operand": topic},
-        ]
-        topic_messages = _paginated_fetch(client, narrow, cutoff, anchor_time)
-        windowed = _context_window(topic_messages, email)
-        all_context_messages.extend(windowed)
-
-    if not all_context_messages:
-        return "No messages found."
-
-    return format_topics(all_context_messages)
 
 
 # ============================================================================
@@ -907,24 +770,19 @@ def get_stream_topics(stream: str, limit: int = 20) -> list[dict]:
 
 def get_topic_messages(stream: str, topic: str, num_messages: int = 20,
                        before_message_id: Optional[int] = None) -> list[dict]:
-    """Get messages from a specific stream/topic. Returns raw message dicts sorted by ID."""
-    if not is_private_stream_allowed(stream):
+    """Get messages from a stream/topic up to and including ``before_message_id``.
+
+    Returns raw message dicts sorted by ID, or [] on error or when the
+    stream is a disallowed private stream.
+    """
+    try:
+        page = fetch_narrow(
+            build_narrow(stream=stream, topic=topic), num_messages=num_messages,
+            before_message_id=before_message_id + 1 if before_message_id else None,
+        )
+    except ValueError:
         return []
-    result = get_client().get_messages({
-        "narrow": [
-            {"operator": "stream", "operand": stream},
-            {"operator": "topic", "operand": topic},
-        ],
-        "anchor": before_message_id or "newest",
-        "num_before": min(num_messages, 100),
-        "num_after": 0,
-        "apply_markdown": False,
-    })
-    if result["result"] != "success":
-        return []
-    msgs = result.get("messages", [])
-    msgs.sort(key=lambda m: m["id"])
-    return msgs
+    return page.messages
 
 
 def fetch_new_messages(stream: str, topic: str, after_id: int,
@@ -950,6 +808,196 @@ def fetch_new_messages(stream: str, topic: str, after_id: int,
         msgs = [m for m in msgs if m.get("sender_id") != exclude_user_id]
     msgs.sort(key=lambda m: m["id"])
     return msgs
+
+
+_DATE_ANCHOR_FEATURE_LEVEL = 445
+
+
+def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
+                 dm_with: Optional[list[str]] = None, sender: Optional[str] = None,
+                 query: Optional[str] = None, channels: Optional[str] = None) -> list[dict]:
+    """Build a Zulip narrow from the given filters; empty filters are omitted.
+
+    ``dm_with`` selects exactly that DM conversation (self is implied).
+    ``query`` is Zulip's server-side keyword search. ``channels="public"``
+    widens a search to the full history of every public channel.
+    """
+    narrow = []
+    if channels:
+        narrow.append({"operator": "channels", "operand": channels})
+    if stream:
+        narrow.append({"operator": "channel", "operand": stream})
+    if topic:
+        narrow.append({"operator": "topic", "operand": topic})
+    if dm_with:
+        # The server accepts a comma-separated email string or a list of user
+        # IDs here; a list of emails is rejected.
+        narrow.append({"operator": "dm", "operand": ",".join(dm_with)})
+    if sender:
+        narrow.append({"operator": "sender", "operand": sender})
+    if query:
+        narrow.append({"operator": "search", "operand": query})
+    return narrow
+
+
+def _is_readable(msg: dict) -> bool:
+    """Whether a fetched message passes the DM and private-stream rules."""
+    if msg.get("type") == "private":
+        return dm_reads_allowed()
+    if msg.get("type") != "stream":
+        return True
+    return is_private_stream_allowed(msg.get("display_recipient", ""))
+
+
+class ReadScopeError(ValueError):
+    """Raised when a narrow doesn't name a scope this process may read."""
+
+
+# The server still accepts the underscore spellings of the legacy operators.
+_DM_OPERATORS = frozenset({"dm", "dm-including", "pm-with", "pm_with", "group-pm-with", "group_pm_with"})
+_CHANNEL_OPERATORS = frozenset({"channel", "stream"})
+_CHANNELS_OPERATORS = frozenset({"channels", "streams"})
+
+
+def _channel_operands(narrow: list[dict]) -> list[str]:
+    """Operands of the non-negated ``channel``/``stream`` terms that are names."""
+    return [t["operand"] for t in narrow
+            if isinstance(t, dict) and t.get("operator") in _CHANNEL_OPERATORS
+            and t.get("negated") is not True and isinstance(t.get("operand"), str)]
+
+
+def _check_read_scope(narrow: list[dict]) -> None:
+    """Raise ReadScopeError unless the narrow names a scope this process may read.
+
+    Under ``__ALL__`` the server decides. Otherwise the narrow must name
+    allowed channels (by name) or public channels, and must not select DMs
+    or use ``with``. Don't subtract hidden scopes with negated terms
+    instead: narrows travel in the GET query string, which breaks past a
+    few dozen terms.
+    """
+    if dm_reads_allowed():
+        return
+    if not all(isinstance(t, dict) for t in narrow):
+        raise ReadScopeError("Narrow terms must be dicts with operator and operand.")
+    # The server parses a "false" string as False, so only True negates.
+    terms = [t for t in narrow if t.get("negated") is not True]
+    for term in terms:
+        operator, operand = term.get("operator"), term.get("operand")
+        if operator in _DM_OPERATORS or (operator == "is" and operand in ("dm", "private")):
+            raise ReadScopeError(DM_READS_DENIED)
+        # with: moves the narrow to the target message's conversation.
+        if operator == "with":
+            raise ReadScopeError("The with operator requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__.")
+        # The server resolves an int as a channel ID; the allowlist holds names.
+        if operator in _CHANNEL_OPERATORS and not isinstance(operand, str):
+            raise ReadScopeError(f"Channel operands must be names, not {type(operand).__name__}.")
+    channels = _channel_operands(terms)
+    if channels:
+        if not all(is_private_stream_allowed(c) for c in channels):
+            raise ReadScopeError(PRIVATE_STREAM_DENIED)
+        return
+    # Not channels:archived, which includes private archived channels.
+    if any(t.get("operator") in _CHANNELS_OPERATORS and t.get("operand") in ("public", "web-public")
+           for t in terms):
+        return
+    message = ("Reading without naming a channel requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__; "
+               "narrow to one channel or to public channels.")
+    allowlisted = allowlisted_private_streams()
+    if allowlisted:
+        message += f" Allowlisted private channels: {', '.join(allowlisted)}."
+    raise ReadScopeError(message)
+
+
+class MessagePage(NamedTuple):
+    """One page from :func:`fetch_narrow`.
+
+    ``older_than`` is the ``before_message_id`` for the next page, or None
+    when nothing older is in range.
+    """
+    messages: list[dict]
+    older_than: Optional[int]
+
+
+def fetch_narrow(narrow: list[dict], num_messages: int = 20,
+                 before_message_id: Optional[int] = None,
+                 after: Optional[datetime] = None,
+                 before: Optional[datetime] = None) -> MessagePage:
+    """Fetch one page of messages matching a narrow, paging backward.
+
+    The page ends just before ``before_message_id`` (exclusive), else just
+    before ``before``, else at the newest message; ``after`` is a
+    client-side lower bound. Naive bounds are in ``TIMEZONE``; both widen to
+    whole seconds, since Zulip timestamps are integers. Unreadable messages,
+    and ignored streams unless the narrow names a channel, are dropped after
+    the paging cursor is taken.
+
+    Raises ReadScopeError before fetching (see :func:`_check_read_scope`).
+    Raises ValueError on API errors, when ``after`` is not earlier than
+    ``before``, or when ``before`` is the anchor (no ``before_message_id``)
+    on a server older than Zulip 12.0.
+    """
+    _check_read_scope(narrow)
+    if after is not None and after.tzinfo is None:
+        after = after.replace(tzinfo=TIMEZONE)
+    if before is not None and before.tzinfo is None:
+        before = before.replace(tzinfo=TIMEZONE)
+    if after is not None and before is not None and after >= before:
+        raise ValueError("after must be earlier than before")
+    client = get_client()
+    limit = min(max(num_messages, 1), 100)
+    request: dict = {
+        "narrow": narrow,
+        "num_before": limit,
+        "num_after": 0,
+        "apply_markdown": False,
+    }
+    if before_message_id is not None:
+        request["anchor"] = before_message_id
+        request["include_anchor"] = False
+    elif before is not None:
+        if client.feature_level < _DATE_ANCHOR_FEATURE_LEVEL:
+            raise ValueError(
+                f"before= requires Zulip 12.0+ (feature level {_DATE_ANCHOR_FEATURE_LEVEL}); "
+                f"this server is at feature level {client.feature_level}"
+            )
+        request["anchor"] = "date"
+        request["anchor_date"] = before.astimezone(timezone.utc).isoformat()
+        # When nothing is on or after the date the server anchors on the
+        # newest message, which is in range and must be kept. In the normal
+        # case the timestamp filter below drops the anchor.
+        request["include_anchor"] = True
+    else:
+        request["anchor"] = "newest"
+
+    result = client.get_messages(request)
+    if result.get("result") != "success":
+        raise ValueError(f"Zulip API error: {result.get('msg', 'unknown error')}")
+    raw = sorted(result.get("messages", []), key=lambda m: m["id"])
+
+    msgs = raw
+    if before is not None:
+        cutoff = math.ceil(before.timestamp())
+        msgs = [m for m in msgs if m.get("timestamp", 0) < cutoff]
+    page = msgs[-limit:]
+    trimmed = len(page) < len(msgs)
+
+    reached_after = False
+    if after is not None:
+        floor = math.floor(after.timestamp())
+        in_range = [m for m in page if m.get("timestamp", 0) >= floor]
+        reached_after = len(in_range) < len(page)
+        page = in_range
+
+    oldest = page or raw
+    older_than = None
+    if oldest and not reached_after and (trimmed or not result.get("found_oldest", False)):
+        older_than = oldest[0]["id"]
+
+    readable = [m for m in page if _is_readable(m)]
+    if _ignored_streams and not _channel_operands(narrow):
+        readable = [m for m in readable if m.get("type") != "stream"
+                    or m.get("display_recipient", "").lower() not in _ignored_streams]
+    return MessagePage(readable, older_than)
 
 
 def send_message(stream: str, topic: str, content: str) -> dict:
@@ -1187,7 +1235,9 @@ def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
     if result.get("result") != "success" or not result.get("messages"):
         return None
     target = result["messages"][0]
-    if target.get("type") != "stream":
+    if target.get("id") != message_id or target.get("type") != "stream":
+        return None
+    if not _is_readable(target):
         return None
     stream = target.get("display_recipient", "")
     topic = target.get("subject", "")
@@ -1199,27 +1249,29 @@ def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
 def get_custom_profile_fields() -> list[dict]:
     """Get the org's custom profile field definitions. Cached aggressively."""
     cache_key = ("custom_profile_fields",)
-    cached = _cache.get(cache_key)
+    cached = _get_cache().get(cache_key)
     if cached is not None:
         return cached
     result = get_client().call_endpoint(url="/realm/profile_fields", method="GET")
     if result.get("result") != "success":
         return []
     fields = result.get("custom_fields", [])
-    _cache.set(cache_key, fields, expire=3600)
+    _get_cache().set(cache_key, fields, expire=3600)
     return fields
 
 
 def get_user_info(email: str) -> Optional[dict]:
     """Get user info by email, including custom profile fields. Returns user dict or None."""
+    # Quoted so "/" or "?" in the email can't steer the request to another
+    # endpoint once the client joins it onto the base URL.
     result = get_client().call_endpoint(
-        url=f"/users/{email}",
+        url=f"/users/{urllib.parse.quote(email, safe='@+')}",
         method="GET",
         request={"include_custom_profile_fields": True},
     )
     if result.get("result") != "success":
         return None
-    return result["user"]
+    return result.get("user")
 
 
 def get_message_by_id(message_id: int) -> Optional[dict]:
@@ -1238,10 +1290,11 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     if result.get("result") != "success" or not result.get("messages"):
         return None
     msg = result["messages"][0]
-    if msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not is_private_stream_allowed(stream):
-            return None
+    # The server substitutes the nearest message when the ID doesn't exist.
+    if msg.get("id") != message_id:
+        return None
+    if not _is_readable(msg):
+        return None
     return msg
 
 
@@ -1314,6 +1367,8 @@ def get_message_link(message_id: int) -> str:
     if not msg:
         url = f"{base}/#narrow/id/{message_id}"
         return f"[message]({url})"
+    if msg.get("type") == "private":
+        return f"[DM]({base}/#narrow/id/{message_id})"
 
     stream = msg.get("display_recipient", "")
     topic = msg.get("subject", "")
@@ -1343,7 +1398,7 @@ def get_subscribed_streams() -> list[dict]:
         return []
     subs = result.get("subscriptions", [])
     allowed = _allowed_private_streams()
-    if allowed is not None:
+    if _ALL_PRIVATE_STREAMS not in allowed:
         subs = [
             s for s in subs
             if not s.get("invite_only", False) or s["name"].lower() in allowed
@@ -1375,11 +1430,43 @@ def get_stream_members(stream: str) -> list[dict]:
     return sorted(members, key=lambda u: u["full_name"])
 
 
-def download_file(path: str) -> tuple[bytes, str]:
-    """Download a file from Zulip. Returns (content_bytes, content_type).
+def _upload_path(path: str) -> str:
+    """Validate a ``/user_uploads/`` path and return it.
 
-    Raises ValueError on any download error.
+    Anything else would turn the authenticated session into a generic GET
+    proxy that bypasses the private-stream allowlist and bot filtering.
     """
+    parts = urllib.parse.urlsplit(path)
+    raw = path.lower()
+    decoded = urllib.parse.unquote(parts.path)
+    # requests sends %2F and %5C as-is and the web server decodes them into
+    # separators, so ``..%2F`` would escape /user_uploads/ after this check.
+    if (parts.scheme or parts.netloc or parts.query or parts.fragment
+            or not parts.path.startswith("/user_uploads/")
+            or "%2f" in raw or "%5c" in raw or "\\" in raw or "\\" in decoded
+            or any(seg in (".", "..") for seg in decoded.split("/"))):
+        raise ValueError(
+            f"Only /user_uploads/ paths without a query, dot segments, or encoded "
+            f"separators can be fetched: {path!r}"
+        )
+    return parts.path
+
+
+def _upload_filename(path: str) -> str:
+    """Local filename for an upload path: its basename, never hidden or empty."""
+    name = _upload_path(path).rsplit("/", 1)[-1]
+    if not name or name.startswith(".") or Path(name).name != name:
+        raise ValueError(f"Cannot derive a safe filename from {path!r}")
+    return name
+
+
+def download_file(path: str) -> tuple[bytes, str]:
+    """Download a ``/user_uploads/`` file from Zulip. Returns (content_bytes, content_type).
+
+    Access to an upload is by its path token; the stream allowlist isn't checked.
+    Raises ValueError for other paths and on any download error.
+    """
+    path = _upload_path(path)
     client = get_client()
     client.ensure_session()
     if client.session is None:
@@ -1388,8 +1475,6 @@ def download_file(path: str) -> tuple[bytes, str]:
     base = client.base_url.rstrip("/")
     if base.endswith("/api"):
         base = base[:-4]
-    if not path.startswith("/"):
-        path = "/" + path
 
     response = client.session.get(base + path, timeout=30)
     if response.status_code == 403:
@@ -1403,20 +1488,26 @@ def download_file(path: str) -> tuple[bytes, str]:
 
 
 def save_file(path: str, save_dir: Optional[str] = None) -> tuple[str, int, str]:
-    """Download a Zulip file and save it locally.
+    """Download a Zulip file and save it locally without overwriting.
 
-    Returns (saved_path, size_bytes, content_type).
+    Returns (saved_path, size_bytes, content_type). Raises ValueError for
+    invalid paths, download errors, or when the target file already exists.
     """
-    content, content_type = download_file(path)
-    filename = Path(path).name
-
+    filename = _upload_filename(path)
     if save_dir:
         save_path = Path(save_dir) / filename
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        if save_path.exists():
+            raise ValueError(f"File already exists: {save_path}")
     else:
         save_path = Path(tempfile.mkdtemp()) / filename
 
-    save_path.write_bytes(content)
+    content, content_type = download_file(path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(save_path, "xb") as f:
+            f.write(content)
+    except FileExistsError:
+        raise ValueError(f"File already exists: {save_path}") from None
     return str(save_path), len(content), content_type
 
 

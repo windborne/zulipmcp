@@ -5,8 +5,8 @@ All Zulip logic lives in zulipmcp.core; this file only handles MCP tool
 registration and session state.
 
 Usage:
-    python -m zulipmcp.mcp                  # stdio (Claude Code)
-    python -m zulipmcp.mcp --transport sse  # SSE
+    python -m zulipmcp                  # stdio (Claude Code)
+    python -m zulipmcp --transport sse  # SSE
 
 Bot visibility filtering:
     - Topics containing '/nobots' or '/nb' are hidden from the bot (not shown in topic lists or messages)
@@ -21,7 +21,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
@@ -50,10 +50,12 @@ from . import core as zulip_core
 
 mcp = FastMCP("Zulip Messaging")
 
-PRIVATE_STREAM_ERROR = (
-    "Error: Private stream access denied for this session. "
-    "You can only access the private stream where you were pinged."
-)
+# Tag every tool that writes to Zulip; run_server() hides them in read-only
+# mode. Tagging is UX only; _ReadOnlyAdapter (mounted by _ReadOnlyClient)
+# enforces.
+WRITE_TAG = "write"
+
+PRIVATE_STREAM_ERROR = f"Error: {zulip_core.PRIVATE_STREAM_DENIED}"
 WRITE_STREAM_ERROR = (
     "Error: Stream write access denied for this session. "
     "This stream is not allowed by BOT_ALLOWED_WRITE_STREAMS."
@@ -61,8 +63,8 @@ WRITE_STREAM_ERROR = (
 
 
 def _reject_if_private(stream: str) -> str | None:
-    """Return an error string if the stream is private, None otherwise."""
-    if zulip_core.is_stream_private(stream) and not zulip_core.is_private_stream_allowed(stream):
+    """Return an error string if the stream is private and not allowlisted, None otherwise."""
+    if not zulip_core.is_private_stream_allowed(stream):
         return PRIVATE_STREAM_ERROR
     return None
 
@@ -359,7 +361,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     return output
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     """Initialize the session context for a conversation.
     Call this once at the start of a session to set where you're chatting.
@@ -396,7 +398,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     return result
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def reply(content: str) -> str:
     """Reply in the current session context.
 
@@ -500,7 +502,7 @@ def _build_listen_response(visible_messages: list[dict],
     return output
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 async def listen(timeout_hours: float, ctx: Context) -> str:
     """Wait for new messages in the current conversation (blocking).
 
@@ -695,7 +697,7 @@ def _after_reply_typing() -> None:
 
 
 def _stop_typing_safe():
-    """Stop typing indicator, ignoring errors. Deliberately not gated by auto_typing_start — see CLAUDE.md."""
+    """Stop typing indicator, ignoring errors. Deliberately not gated by auto_typing_start — see AGENTS.md."""
     if _session.active and _session.stream and _session.topic:
         try:
             zulip_core.send_typing(_session.stream, _session.topic, "stop")
@@ -706,7 +708,7 @@ def _stop_typing_safe():
 _DEFAULT_FAREWELL = ":wave: Signing off"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def end_session(message: str = _DEFAULT_FAREWELL) -> str:
     """End the current session gracefully.
     Writes a clean exit marker so the listener knows this was intentional.
@@ -865,56 +867,162 @@ def get_stream_members(stream: str) -> str:
     return "\n".join(lines)
 
 
+def _parse_when(value: str) -> Optional[datetime]:
+    """Parse an ISO 8601 date/datetime argument, or None for "". Raises ValueError.
+
+    Date-only and naive values are interpreted in ``zulip_core.TIMEZONE``.
+    """
+    if not value:
+        return None
+    text = value.strip()
+    # Python 3.10's fromisoformat rejects a trailing Z.
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"Invalid date {value!r}; use ISO 8601 such as 2025-03-01 or 2025-03-01T14:30"
+        ) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=zulip_core.TIMEZONE)
+    return parsed
+
+
+def _dm_label(emails: list[str]) -> str:
+    """DM participants other than self, or just self for a self-DM."""
+    me = (zulip_core.get_client().email or "").lower()
+    others = [e for e in emails if e.lower() != me]
+    return "DM with " + ", ".join(others or emails)
+
+
 @mcp.tool()
 def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                  before_message_id: Optional[int] = None,
-                 message_id: Optional[int] = None) -> str:
-    """Get messages from a stream/topic, or fetch context around a message ID.
+                 message_id: Optional[int] = None,
+                 dm_with: list[str] | None = None,
+                 after: str = "", before: str = "") -> str:
+    """Read one conversation: stream+topic or dm_with.
 
-    Accepts either stream+topic OR message_id:
-    - stream+topic: fetch messages from that topic (with optional pagination)
-    - message_id: auto-discover stream/topic, fetch context around that message
-    - Both: use stream/topic narrow with anchor at message_id
+    message_id alone finds its conversation; the page ends at message_id
+    (inclusive) unless before_message_id is given.
 
     Args:
         stream: Stream/channel name (optional if message_id given).
         topic: Topic name (optional if message_id given).
         num_messages: Number of messages (default 20, max 100).
-        before_message_id: Get messages before this ID (for pagination).
-        message_id: Fetch context around this message ID.
+        before_message_id: Only messages older than this ID (for pagination).
+        message_id: Fetch messages up to and including this ID.
+        dm_with: Emails of exactly the other DM participants (yourself is implied).
+        after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
+        before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
     """
-    # If message_id is given but no stream/topic, discover them
-    if message_id and (not stream or not topic):
-        ctx = zulip_core.discover_message_context(message_id)
-        if ctx is None:
-            return f"Message {message_id} not found or is not in a stream/topic context."
-        stream, topic = ctx
+    if dm_with and (stream or topic):
+        return "Error: Provide stream+topic or dm_with, not both."
 
-    if not stream or not topic:
-        return "Error: Provide stream+topic or message_id."
+    if message_id and not dm_with and not (stream and topic):
+        msg = zulip_core.get_message_by_id(message_id)
+        if not msg:
+            return f"Message {message_id} not found or not accessible."
+        if msg.get("type") == "private":
+            stream, topic = "", ""
+            dm_with = [r["email"] for r in msg.get("display_recipient", []) if r.get("email")]
+        else:
+            stream, topic = msg.get("display_recipient", ""), msg.get("subject", "")
 
-    err = _reject_if_private(stream)
-    if err:
-        return err
-
-    # Fetch messages
-    if message_id and not before_message_id:
-        # Fetch context around the message
-        messages = zulip_core.get_topic_messages(
-            stream, topic, num_messages=num_messages,
-            before_message_id=message_id + 1,
-        )
+    if dm_with:
+        label = _dm_label(dm_with)
     else:
-        messages = zulip_core.get_topic_messages(
-            stream, topic, num_messages=num_messages,
-            before_message_id=before_message_id,
-        )
+        if not stream or not topic:
+            return "Error: Provide stream+topic, dm_with, or message_id."
+        visibility = "private" if zulip_core.is_stream_private(stream) else "public"
+        label = f"[{visibility}] #{stream} > {topic}"
 
-    visibility = "private" if zulip_core.is_stream_private(stream) else "public"
-    header = f"Messages from [{visibility}] #{stream} > {topic}:"
-    if message_id:
-        header = f"History for [{visibility}] #{stream} > {topic} (around message {message_id}):"
-    return header + "\n\n" + zulip_core.format_messages(messages)
+    ends_at_message_id = before_message_id is None and bool(message_id)
+    if ends_at_message_id:
+        before_message_id = message_id + 1
+    try:
+        page = zulip_core.fetch_narrow(
+            zulip_core.build_narrow(stream=stream, topic=topic, dm_with=dm_with),
+            num_messages=num_messages, before_message_id=before_message_id,
+            after=_parse_when(after), before=_parse_when(before),
+        )
+    except ValueError as e:
+        return f"Error: {e}"
+
+    header = f"Messages from {label}:"
+    if ends_at_message_id:
+        header = f"History for {label} (up to message {message_id}):"
+    if page.older_than is not None:
+        header += f"\n(Older: before_message_id={page.older_than})"
+    elif after:
+        header += f"\n(No older messages at or after {after}.)"
+    else:
+        header += "\n(No older messages.)"
+    return header + "\n\n" + zulip_core.format_messages(page.messages)
+
+
+@mcp.tool()
+def search_messages(query: str = "", stream: str = "", topic: str = "",
+                    sender: str = "", dm_with: list[str] | None = None,
+                    scope: Literal["received", "public"] | None = None,
+                    after: str = "", before: str = "", num_messages: int = 20,
+                    before_message_id: Optional[int] = None) -> str:
+    """Search messages with Zulip's built-in keyword search.
+
+    Returns the most recent matches, oldest first, not ranked by relevance;
+    page back with before_message_id.
+
+    Args:
+        query: Keywords; wrap words in double quotes to match a phrase.
+        stream: Only this stream/channel.
+        topic: Only this topic (requires stream).
+        sender: Only messages from this email.
+        dm_with: Only the DM conversation with exactly these emails.
+        scope: "received" = messages this account received; "public" = full history of all public channels. Default "received" when this server may read DMs (BOT_ALLOWED_PRIVATE_STREAMS=__ALL__), else "public" (private streams then need stream=). Ignored with stream, which searches that stream's full history.
+        after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
+        before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
+        num_messages: Max results (default 20, max 100).
+        before_message_id: Only messages older than this ID (for paging).
+    """
+    if not (query or stream or topic or sender or dm_with):
+        return "Error: Provide at least one of query, stream, topic, sender, or dm_with."
+    if topic and not stream:
+        return "Error: topic requires stream."
+    if dm_with and stream:
+        return "Error: dm_with cannot be combined with stream/topic."
+    if scope == "public" and dm_with:
+        return "Error: scope='public' cannot be combined with dm_with."
+    if scope is None and not stream and not dm_with:
+        scope = "received" if zulip_core.dm_reads_allowed() else "public"
+
+    try:
+        narrow = zulip_core.build_narrow(
+            stream=stream, topic=topic, dm_with=dm_with, sender=sender, query=query,
+            channels="public" if scope == "public" and not stream else None,
+        )
+        page = zulip_core.fetch_narrow(
+            narrow, num_messages=num_messages, before_message_id=before_message_id,
+            after=_parse_when(after), before=_parse_when(before),
+        )
+    except ValueError as e:
+        return f"Error: {e}"
+
+    messages = zulip_core.filter_for_bot(page.messages)
+    count = f"{len(messages)} result{'' if len(messages) == 1 else 's'}"
+    if page.older_than is not None:
+        status = f"{count}; older: before_message_id={page.older_than}"
+    elif after:
+        status = f"{count}; no older matches at or after {after}"
+    else:
+        status = f"{count}; no older matches"
+    allowlisted = zulip_core.allowlisted_private_streams()
+    if scope == "public" and not stream and allowlisted:
+        status += "; also searchable: " + ", ".join(f"stream={s}" for s in allowlisted)
+    header = f"Search as {zulip_core.get_client().email} ({status})"
+    # combine=False: adjacent hits can come from different conversations.
+    body = zulip_core.format_messages(messages, include_topic=True, combine=False)
+    return header + ("\n\n" + body if body else "")
 
 
 @mcp.tool()
@@ -927,11 +1035,6 @@ def get_message_by_id(message_id: int) -> str:
     msg = zulip_core.get_message_by_id(message_id)
     if not msg:
         return f"Message {message_id} not found or not accessible."
-    # Block messages from private streams
-    if msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not zulip_core.is_private_stream_allowed(stream):
-            return PRIVATE_STREAM_ERROR
     return zulip_core.format_messages([msg], include_topic=True)
 
 
@@ -950,11 +1053,8 @@ def get_message_link(message_id: int) -> str:
     Args:
         message_id: The message ID.
     """
-    msg = zulip_core.get_message_by_id(message_id)
-    if msg and msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not zulip_core.is_private_stream_allowed(stream):
-            return PRIVATE_STREAM_ERROR
+    if zulip_core.get_message_by_id(message_id) is None:
+        return f"Message {message_id} not found or not accessible."
     return zulip_core.get_message_link(message_id)
 
 
@@ -991,11 +1091,6 @@ def verify_message(message_id: int) -> str:
     Args:
         message_id: The ID of the message to verify.
     """
-    msg = zulip_core.get_message_by_id(message_id)
-    if msg and msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not zulip_core.is_private_stream_allowed(stream):
-            return PRIVATE_STREAM_ERROR
     return zulip_core.verify_message(message_id)
 
 
@@ -1003,7 +1098,7 @@ def verify_message(message_id: int) -> str:
 # Write tools — sending messages and reactions
 # ============================================================================
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def send_message(stream: str, topic: str, content: str) -> str:
     """Send a message to a specific stream and topic (fire-and-forget).
 
@@ -1025,7 +1120,7 @@ def send_message(stream: str, topic: str, content: str) -> str:
     return f"Message sent to #{stream} > {topic} (id: {result.get('id')})"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def send_direct_message(recipients: list[str], content: str) -> str:
     """Send a direct message (DM) to one or more users.
 
@@ -1046,7 +1141,7 @@ def send_direct_message(recipients: list[str], content: str) -> str:
     return f"DM sent to {recipient_str} (id: {result.get('id')})"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def add_reaction(message_id: int, emoji_name: str) -> str:
     """Add an emoji reaction to a message.
 
@@ -1060,7 +1155,7 @@ def add_reaction(message_id: int, emoji_name: str) -> str:
     return f"Added :{emoji_name}: to message {message_id}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def remove_reaction(message_id: int, emoji_name: str,
                     reaction_type: Optional[str] = None) -> str:
     """Remove an emoji reaction from a message.
@@ -1079,7 +1174,7 @@ def remove_reaction(message_id: int, emoji_name: str,
     return f"Removed :{emoji_name}: from message {message_id}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def edit_message(message_id: int, content: str) -> str:
     """Edit a message the bot previously sent.
 
@@ -1102,7 +1197,7 @@ def edit_message(message_id: int, content: str) -> str:
     return f"Message {message_id} updated."
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def move_messages(message_id: int, topic: str, stream: str = "",
                   propagate_mode: str = "change_one") -> str:
     """Move message(s) to a different topic and/or stream.
@@ -1147,7 +1242,7 @@ def move_messages(message_id: int, topic: str, stream: str = "",
     return f"Moved {mode_desc[propagate_mode]} to {dest}."
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def resolve_topic(message_id: int, topic: str,
                   propagate_mode: str = "change_all") -> str:
     """Rename a topic silently to mark it resolved or unresolved.
@@ -1200,7 +1295,7 @@ def list_emoji(query: str = "") -> str:
     return f"{total} custom emoji: {', '.join(matches)}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def typing() -> str:
     """Send a typing indicator in the current conversation.
     Call this before heavy tool work (code execution, searches, analysis)
@@ -1219,7 +1314,7 @@ def typing() -> str:
     return "Typing indicator start."
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def stop_typing() -> str:
     """Stop the typing indicator in the current conversation.
     Call this when you've finished working but aren't about to send a message
@@ -1336,11 +1431,11 @@ def fetch_image(path: str) -> str:
 
 @mcp.tool()
 def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
-    """Fetch any file from Zulip and save it locally.
+    """Fetch a file uploaded to Zulip and save it locally.
 
     Args:
-        path: File path from message content (e.g. "/user_uploads/...").
-        save_dir: Directory to save to. Uses temp dir if not provided.
+        path: Upload path as it appears in message content; must start with /user_uploads/ (full URLs and query strings are rejected).
+        save_dir: Directory to save to (created if missing); temp dir if omitted. Errors if a file with that name already exists there.
     """
     try:
         saved_path, size_bytes, content_type = zulip_core.save_file(path, save_dir=save_dir)
@@ -1349,7 +1444,7 @@ def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     return f"File saved to: {saved_path}\nSize: {size_bytes / 1024:.1f} KB\nContent-Type: {content_type}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def upload_file(file_path: str) -> str:
     """Upload a local file to Zulip and return markdown to embed it in messages.
 
@@ -1383,11 +1478,22 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     session is auto-initialized before the transport starts — the agent
     wakes up with an active session and can skip ``set_context()``.
     Call :func:`configure` before this to register hooks.
+
+    With ``ZULIPMCP_READ_ONLY`` on, write tools are hidden and session
+    auto-init is skipped (the session tools don't exist in that mode).
     """
+    read_only = zulip_core.is_read_only()
+    if read_only:
+        _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")
+        mcp.disable(tags={WRITE_TAG})
+
     # Auto-init session from env vars when both are present.
     stream = os.environ.get("SESSION_STREAM", "").strip() or None
     topic = os.environ.get("SESSION_TOPIC", "").strip() or None
-    if stream and topic:
+    if read_only:
+        if stream or topic:
+            _logger.warning("run_server: read-only mode, ignoring SESSION_STREAM/SESSION_TOPIC")
+    elif stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
             result = _init_session(stream, topic, num_messages=1)
@@ -1408,9 +1514,5 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Zulip MCP Server")
-    parser.add_argument("--transport", choices=["stdio", "sse"], default="stdio")
-    parser.add_argument("--port", type=int, default=8235)
-    args = parser.parse_args()
-    run_server(transport=args.transport, port=args.port)
+    from zulipmcp.__main__ import main
+    main()
