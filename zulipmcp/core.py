@@ -1171,7 +1171,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
         reached_after = len(in_range) < len(page)
         page = in_range
 
-    oldest = page or msgs or raw
+    oldest = page or raw
     older_than = None
     if oldest and not reached_after and (trimmed or not result.get("found_oldest", False)):
         older_than = oldest[0]["id"]
