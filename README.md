@@ -231,7 +231,7 @@ The typing indicator starts on `set_context()` and after every `reply()`, and st
 
 ### Reading history and search
 
-`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search, by default over messages this account received, or all public history with `scope="public"`. Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+). Private-stream hits outside `BOT_ALLOWED_PRIVATE_STREAMS` are dropped even when the server returns them; DM history needs `__ALL__`.
+`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search, by default over messages this account received, or all public history with `scope="public"`. Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+). Private-stream hits outside `BOT_ALLOWED_PRIVATE_STREAMS` are dropped even when the server returns them; DMs need `__ALL__`.
 
 ### Bot visibility filtering
 
@@ -252,7 +252,7 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `SESSION_USER_EMAIL` | Email of the human who triggered the session. Stored on `SessionState` for hooks. |
 | `SESSION_STREAM` | Stream name for auto-initializing a session on server start (direct `run_server()` callers only -- the listener does not use these). Both `SESSION_STREAM` and `SESSION_TOPIC` must be set; the agent can then skip `set_context()`. |
 | `SESSION_TOPIC` | Topic for auto-init. Requires `SESSION_STREAM`. |
-| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. Only `__ALL__` also permits DM history in `get_messages`/`search_messages`. |
+| `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. Only `__ALL__` also permits reading DMs. |
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
 | `ZULIPMCP_READ_ONLY` | `1`/`true`/`yes`/`on`: the client refuses every non-GET request, and write and session tools are hidden. Unset, empty or `0`/`false`/`no`/`off` = off; anything else is a startup error. See [Read as yourself, post as a bot](#read-as-yourself-post-as-a-bot). |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache base directory (defaults to system temp dir). Each site and account gets its own subdirectory, so servers running as different users never share cached data. |

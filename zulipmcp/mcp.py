@@ -58,7 +58,7 @@ PRIVATE_STREAM_ERROR = (
     "Error: Private stream access denied for this session. "
     "You can only access the private stream where you were pinged."
 )
-DM_READS_ERROR = "Error: Reading DM history requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
+DM_READS_ERROR = "Error: Reading DMs requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
 WRITE_STREAM_ERROR = (
     "Error: Stream write access denied for this session. "
     "This stream is not allowed by BOT_ALLOWED_WRITE_STREAMS."

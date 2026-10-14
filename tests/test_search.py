@@ -489,7 +489,7 @@ def test_dm_reads_denied_without_allow_all(
 
     assert not core.dm_reads_allowed()
     assert get_messages(dm_with=[ALICE]) == mcp.DM_READS_ERROR
-    assert get_messages(message_id=5) == mcp.DM_READS_ERROR
+    assert get_messages(message_id=5) == "Message 5 not found or not accessible."
     assert search_messages(query="hello", dm_with=[ALICE]) == mcp.DM_READS_ERROR
     assert client.requests == []
 
@@ -512,10 +512,31 @@ def test_dm_reads_allowed_with_allow_all(
     assert "private hello" in search_messages(query="hello")
 
 
-def test_single_message_tools_ignore_dm_rule(client: FakeClient) -> None:
+def _tool(name: str):
+    fn = getattr(mcp, name)
+    return getattr(fn, "fn", fn)
+
+
+def test_single_message_tools_deny_dms_without_all(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client.messages = [dm_msg(5, [ALICE, BOT], content="private hello")]
 
-    assert "private hello" in getattr(mcp.get_message_by_id, "fn", mcp.get_message_by_id)(5)
+    assert core.get_message_by_id(5) is None
+    assert "private hello" not in _tool("get_message_by_id")(5)
+    assert "private hello" not in _tool("verify_message")(5)
+    monkeypatch.setattr(client, "base_url", "https://zulip.example.com/api/", raising=False)
+    assert _tool("get_message_link")(5) == "[message](https://zulip.example.com/#narrow/id/5)"
+
+
+def test_single_message_tools_allow_dms_with_all(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", "__ALL__")
+    client.messages = [dm_msg(5, [ALICE, BOT], content="private hello")]
+
+    assert "private hello" in _tool("get_message_by_id")(5)
+    assert "private hello" in _tool("verify_message")(5)
 
 
 # --- search_messages ---------------------------------------------------------

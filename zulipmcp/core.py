@@ -250,7 +250,7 @@ def is_private_stream_allowed(stream_name: str) -> bool:
 
 
 def dm_reads_allowed() -> bool:
-    """Whether DM history may be read: only under ``BOT_ALLOWED_PRIVATE_STREAMS=__ALL__``.
+    """Whether DMs may be read: only under ``BOT_ALLOWED_PRIVATE_STREAMS=__ALL__``.
 
     An explicit stream list never unlocks DMs, which on a shared bot belong
     to every user who has messaged it.
@@ -1465,10 +1465,8 @@ def get_message_by_id(message_id: int) -> Optional[dict]:
     # The server substitutes the nearest message when the ID doesn't exist.
     if msg.get("id") != message_id:
         return None
-    if msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not is_private_stream_allowed(stream):
-            return None
+    if not _is_readable(msg, skip_ignored=False):
+        return None
     return msg
 
 
