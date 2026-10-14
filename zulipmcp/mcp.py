@@ -55,8 +55,7 @@ mcp = FastMCP("Zulip Messaging")
 WRITE_TAG = "write"
 
 PRIVATE_STREAM_ERROR = (
-    "Error: Private stream access denied for this session. "
-    "You can only access the private stream where you were pinged."
+    "Error: Private stream access denied: not in BOT_ALLOWED_PRIVATE_STREAMS."
 )
 DM_READS_ERROR = "Error: Reading DMs requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
 WRITE_STREAM_ERROR = (
@@ -1036,11 +1035,6 @@ def get_message_by_id(message_id: int) -> str:
     msg = zulip_core.get_message_by_id(message_id)
     if not msg:
         return f"Message {message_id} not found or not accessible."
-    # Block messages from private streams
-    if msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not zulip_core.is_private_stream_allowed(stream):
-            return PRIVATE_STREAM_ERROR
     return zulip_core.format_messages([msg], include_topic=True)
 
 
@@ -1059,11 +1053,6 @@ def get_message_link(message_id: int) -> str:
     Args:
         message_id: The message ID.
     """
-    msg = zulip_core.get_message_by_id(message_id)
-    if msg and msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not zulip_core.is_private_stream_allowed(stream):
-            return PRIVATE_STREAM_ERROR
     return zulip_core.get_message_link(message_id)
 
 
@@ -1100,11 +1089,6 @@ def verify_message(message_id: int) -> str:
     Args:
         message_id: The ID of the message to verify.
     """
-    msg = zulip_core.get_message_by_id(message_id)
-    if msg and msg.get("type") == "stream":
-        stream = msg.get("display_recipient", "")
-        if stream and not zulip_core.is_private_stream_allowed(stream):
-            return PRIVATE_STREAM_ERROR
     return zulip_core.verify_message(message_id)
 
 
