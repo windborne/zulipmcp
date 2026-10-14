@@ -86,7 +86,8 @@ platform_toolsets:
 ```
 
 Replace `__ALL__` with comma-separated stream names to narrow the MCP tool
-policy.
+policy. `__ALL__` also lets the agent read the bot's DMs and search everything
+it received; list streams instead to keep DMs closed.
 
 ## Verify
 

@@ -970,11 +970,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
                     before_message_id: Optional[int] = None) -> str:
     """Search messages with Zulip's built-in keyword search.
 
-    Returns the most recent matches, shown oldest to newest and not ranked
-    by relevance; page back with before_message_id. Without stream or
-    dm_with, searches what this account received under
-    BOT_ALLOWED_PRIVATE_STREAMS=__ALL__, else all public channels. Without
-    __ALL__, allowlisted private streams need stream= and DMs are refused.
+    Returns the most recent matches, oldest first, not ranked by relevance;
+    page back with before_message_id.
 
     Args:
         query: Keywords; wrap words in double quotes to match a phrase.
@@ -982,7 +979,7 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
         dm_with: Only the DM conversation with exactly these emails.
-        scope: "received" = messages this account received (needs __ALL__); "public" = full history of all public channels. Default: "received" with __ALL__, else "public". Ignored with stream, which searches that stream's full history.
+        scope: "received" = messages this account received; "public" = full history of all public channels. Default "received" when this server may read DMs (BOT_ALLOWED_PRIVATE_STREAMS=__ALL__), else "public" (private streams then need stream=). Ignored with stream, which searches that stream's full history.
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
         num_messages: Max results (default 20, max 100).
@@ -1436,12 +1433,9 @@ def fetch_image(path: str) -> str:
 def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     """Fetch a file uploaded to Zulip and save it locally.
 
-    Access to an upload is by its path token; the stream allowlist isn't checked.
-
     Args:
-        path: Upload path from message content (e.g. "/user_uploads/...").
-        save_dir: Directory to save to. Uses temp dir if not provided.
-            An existing file with the same name is never overwritten.
+        path: Upload path as it appears in message content; must start with /user_uploads/ (full URLs and query strings are rejected).
+        save_dir: Directory to save to (created if missing); temp dir if omitted. Errors if a file with that name already exists there.
     """
     try:
         saved_path, size_bytes, content_type = zulip_core.save_file(path, save_dir=save_dir)

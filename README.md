@@ -40,6 +40,8 @@ A bot can't read private channels it isn't in or DMs it isn't part of. To let an
 uv tool install git+https://github.com/windborne/zulipmcp.git   # update later with: uv tool upgrade zulipmcp
 ```
 
+`uv tool install` ignores the lockfile; append `@<tag-or-commit>` to the URL to pin a version.
+
 Desktop MCP clients often don't inherit your shell's `PATH`; if `zulipmcp` isn't found, use the absolute path under `uv tool dir --bin`.
 
 ```json
@@ -61,7 +63,7 @@ Desktop MCP clients often don't inherit your shell's `PATH`; if `zulipmcp` isn't
 }
 ```
 
-Read-only mode constrains this server, not an agent that can read the personal zuliprc file itself.
+`__ALL__` lets that server read DMs and search everything the account received. Read-only mode constrains this server, not an agent that can read the personal zuliprc file itself.
 
 ## Requirements
 
