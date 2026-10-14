@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from typing import Callable, Optional
+from typing import IO, Any, Callable, Dict, List, Mapping, Optional
 
 import diskcache
 import requests
@@ -428,12 +428,44 @@ def _get_cache() -> diskcache.Cache:
     return _open_cache(identity)
 
 
+class ReadOnlyError(PermissionError):
+    """Raised when a write is attempted while ``ZULIPMCP_READ_ONLY`` is on."""
+
+
+def is_read_only() -> bool:
+    """Whether ``ZULIPMCP_READ_ONLY`` is set to ``1`` or ``true``."""
+    return os.environ.get("ZULIPMCP_READ_ONLY", "").strip().lower() in ("1", "true")
+
+
+class _ReadOnlyClient(zulip.Client):
+    """Client that refuses every non-GET request before it reaches the network."""
+
+    def do_api_query(
+        self,
+        orig_request: Mapping[str, Any],
+        url: str,
+        method: str = "POST",
+        longpolling: bool = False,
+        files: Optional[List[IO[Any]]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if method.upper() != "GET":
+            raise ReadOnlyError(f"ZULIPMCP_READ_ONLY is set; refusing {method} {url}")
+        return super().do_api_query(
+            orig_request, url, method=method, longpolling=longpolling,
+            files=files, timeout=timeout,
+        )
+
+
 def get_client() -> zulip.Client:
     """Get or create the Zulip client singleton.
 
     Config resolution order:
         1. ZULIP_RC_PATH environment variable (absolute path to zuliprc)
         2. .zuliprc in the current working directory
+
+    With ``ZULIPMCP_READ_ONLY`` on, the client raises :class:`ReadOnlyError`
+    for every non-GET request.
     """
     global _client
     if _client is None:
@@ -449,10 +481,12 @@ def get_client() -> zulip.Client:
                 f"zuliprc not found at: {config_path}\n"
                 f"Set ZULIP_RC_PATH env var or place .zuliprc in the working directory."
             )
-        _client = zulip.Client(config_file=str(config_path))
+        client_class = _ReadOnlyClient if is_read_only() else zulip.Client
+        _client = client_class(config_file=str(config_path))
         # Log identity so it's visible in MCP startup output
         email = _client.email or "unknown"
-        print(f"[zulipmcp] Zulip client initialized as: {email} (from {config_path})", file=sys.stderr)
+        mode = " [read-only]" if isinstance(_client, _ReadOnlyClient) else ""
+        print(f"[zulipmcp] Zulip client initialized as: {email} (from {config_path}){mode}", file=sys.stderr)
     return _client
 
 

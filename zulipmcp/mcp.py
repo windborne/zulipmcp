@@ -50,6 +50,10 @@ from . import core as zulip_core
 
 mcp = FastMCP("Zulip Messaging")
 
+# Tag every tool that writes to Zulip; apply_read_only() hides them. Tagging is
+# UX only: the read-only guarantee is core's refusal of non-GET requests.
+WRITE_TAG = "write"
+
 PRIVATE_STREAM_ERROR = (
     "Error: Private stream access denied for this session. "
     "You can only access the private stream where you were pinged."
@@ -359,7 +363,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     return output
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     """Initialize the session context for a conversation.
     Call this once at the start of a session to set where you're chatting.
@@ -396,7 +400,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     return result
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def reply(content: str) -> str:
     """Reply in the current session context.
 
@@ -500,7 +504,7 @@ def _build_listen_response(visible_messages: list[dict],
     return output
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 async def listen(timeout_hours: float, ctx: Context) -> str:
     """Wait for new messages in the current conversation (blocking).
 
@@ -706,7 +710,7 @@ def _stop_typing_safe():
 _DEFAULT_FAREWELL = ":wave: Signing off"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def end_session(message: str = _DEFAULT_FAREWELL) -> str:
     """End the current session gracefully.
     Writes a clean exit marker so the listener knows this was intentional.
@@ -1003,7 +1007,7 @@ def verify_message(message_id: int) -> str:
 # Write tools — sending messages and reactions
 # ============================================================================
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def send_message(stream: str, topic: str, content: str) -> str:
     """Send a message to a specific stream and topic (fire-and-forget).
 
@@ -1025,7 +1029,7 @@ def send_message(stream: str, topic: str, content: str) -> str:
     return f"Message sent to #{stream} > {topic} (id: {result.get('id')})"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def send_direct_message(recipients: list[str], content: str) -> str:
     """Send a direct message (DM) to one or more users.
 
@@ -1046,7 +1050,7 @@ def send_direct_message(recipients: list[str], content: str) -> str:
     return f"DM sent to {recipient_str} (id: {result.get('id')})"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def add_reaction(message_id: int, emoji_name: str) -> str:
     """Add an emoji reaction to a message.
 
@@ -1060,7 +1064,7 @@ def add_reaction(message_id: int, emoji_name: str) -> str:
     return f"Added :{emoji_name}: to message {message_id}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def remove_reaction(message_id: int, emoji_name: str,
                     reaction_type: Optional[str] = None) -> str:
     """Remove an emoji reaction from a message.
@@ -1079,7 +1083,7 @@ def remove_reaction(message_id: int, emoji_name: str,
     return f"Removed :{emoji_name}: from message {message_id}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def edit_message(message_id: int, content: str) -> str:
     """Edit a message the bot previously sent.
 
@@ -1102,7 +1106,7 @@ def edit_message(message_id: int, content: str) -> str:
     return f"Message {message_id} updated."
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def move_messages(message_id: int, topic: str, stream: str = "",
                   propagate_mode: str = "change_one") -> str:
     """Move message(s) to a different topic and/or stream.
@@ -1147,7 +1151,7 @@ def move_messages(message_id: int, topic: str, stream: str = "",
     return f"Moved {mode_desc[propagate_mode]} to {dest}."
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def resolve_topic(message_id: int, topic: str,
                   propagate_mode: str = "change_all") -> str:
     """Rename a topic silently to mark it resolved or unresolved.
@@ -1200,7 +1204,7 @@ def list_emoji(query: str = "") -> str:
     return f"{total} custom emoji: {', '.join(matches)}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def typing() -> str:
     """Send a typing indicator in the current conversation.
     Call this before heavy tool work (code execution, searches, analysis)
@@ -1219,7 +1223,7 @@ def typing() -> str:
     return "Typing indicator start."
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def stop_typing() -> str:
     """Stop the typing indicator in the current conversation.
     Call this when you've finished working but aren't about to send a message
@@ -1349,7 +1353,7 @@ def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     return f"File saved to: {saved_path}\nSize: {size_bytes / 1024:.1f} KB\nContent-Type: {content_type}"
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def upload_file(file_path: str) -> str:
     """Upload a local file to Zulip and return markdown to embed it in messages.
 
@@ -1376,6 +1380,15 @@ def upload_file(file_path: str) -> str:
 # Server entry point
 # ============================================================================
 
+def apply_read_only(server: FastMCP) -> None:
+    """Hide every tool tagged ``WRITE_TAG`` from *server*.
+
+    Disabled tools are neither listed nor callable. This is UX only — the
+    read-only guarantee is the client-level refusal in ``core.get_client()``.
+    """
+    server.disable(tags={WRITE_TAG})
+
+
 def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
     """Start the MCP server.
 
@@ -1383,11 +1396,22 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     session is auto-initialized before the transport starts — the agent
     wakes up with an active session and can skip ``set_context()``.
     Call :func:`configure` before this to register hooks.
+
+    With ``ZULIPMCP_READ_ONLY`` on, write tools are hidden and session
+    auto-init is skipped (the session tools don't exist in that mode).
     """
+    read_only = zulip_core.is_read_only()
+    if read_only:
+        _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")
+        apply_read_only(mcp)
+
     # Auto-init session from env vars when both are present.
     stream = os.environ.get("SESSION_STREAM", "").strip() or None
     topic = os.environ.get("SESSION_TOPIC", "").strip() or None
-    if stream and topic:
+    if read_only:
+        if stream or topic:
+            _logger.warning("run_server: read-only mode, ignoring SESSION_STREAM/SESSION_TOPIC")
+    elif stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
             result = _init_session(stream, topic, num_messages=1)
