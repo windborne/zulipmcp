@@ -54,10 +54,8 @@ mcp = FastMCP("Zulip Messaging")
 # mode. Tagging is UX only; _ReadOnlyClient enforces.
 WRITE_TAG = "write"
 
-PRIVATE_STREAM_ERROR = (
-    "Error: Private stream access denied: not in BOT_ALLOWED_PRIVATE_STREAMS."
-)
-DM_READS_ERROR = "Error: Reading DMs requires BOT_ALLOWED_PRIVATE_STREAMS=__ALL__."
+PRIVATE_STREAM_ERROR = f"Error: {zulip_core.PRIVATE_STREAM_DENIED}"
+DM_READS_ERROR = f"Error: {zulip_core.DM_READS_DENIED}"
 WRITE_STREAM_ERROR = (
     "Error: Stream write access denied for this session. "
     "This stream is not allowed by BOT_ALLOWED_WRITE_STREAMS."
@@ -933,15 +931,10 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
             stream, topic = msg.get("display_recipient", ""), msg.get("subject", "")
 
     if dm_with:
-        if not zulip_core.dm_reads_allowed():
-            return DM_READS_ERROR
         label = _dm_label(dm_with)
     else:
         if not stream or not topic:
             return "Error: Provide stream+topic, dm_with, or message_id."
-        err = _reject_if_private(stream)
-        if err:
-            return err
         visibility = "private" if zulip_core.is_stream_private(stream) else "public"
         label = f"[{visibility}] #{stream} > {topic}"
 
@@ -972,15 +965,16 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
 @mcp.tool()
 def search_messages(query: str = "", stream: str = "", topic: str = "",
                     sender: str = "", dm_with: list[str] | None = None,
-                    scope: Literal["received", "public"] = "received",
+                    scope: Literal["received", "public"] | None = None,
                     after: str = "", before: str = "", num_messages: int = 20,
                     before_message_id: Optional[int] = None) -> str:
     """Search messages with Zulip's built-in keyword search.
 
     Returns the most recent matches, shown oldest to newest and not ranked
-    by relevance; page back with before_message_id. DMs appear only with
-    BOT_ALLOWED_PRIVATE_STREAMS=__ALL__, private channels only if allowlisted;
-    others are dropped silently.
+    by relevance; page back with before_message_id. Without stream or
+    dm_with, searches what this account received under
+    BOT_ALLOWED_PRIVATE_STREAMS=__ALL__, else all public channels. Without
+    __ALL__, allowlisted private streams need stream= and DMs are refused.
 
     Args:
         query: Keywords; wrap words in double quotes to match a phrase.
@@ -988,7 +982,7 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
         dm_with: Only the DM conversation with exactly these emails.
-        scope: "received" = messages this account received, or the full history of stream when one is given; "public" = full history of all public channels.
+        scope: "received" = messages this account received (needs __ALL__); "public" = full history of all public channels. Default: "received" with __ALL__, else "public". Ignored with stream, which searches that stream's full history.
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
         num_messages: Max results (default 20, max 100).
@@ -1002,12 +996,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         return "Error: dm_with cannot be combined with stream/topic."
     if scope == "public" and dm_with:
         return "Error: scope='public' cannot be combined with dm_with."
-    if dm_with and not zulip_core.dm_reads_allowed():
-        return DM_READS_ERROR
-    if stream:
-        err = _reject_if_private(stream)
-        if err:
-            return err
+    if scope is None and not stream and not dm_with:
+        scope = "received" if zulip_core.dm_reads_allowed() else "public"
 
     try:
         narrow = zulip_core.build_narrow(
@@ -1029,6 +1019,9 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         status = f"{count}; no older matches at or after {after}"
     else:
         status = f"{count}; no older matches"
+    allowlisted = zulip_core.allowlisted_private_streams()
+    if scope == "public" and not stream and allowlisted:
+        status += "; also searchable: " + ", ".join(f"stream={s}" for s in allowlisted)
     header = f"Search as {zulip_core.get_client().email} ({status})"
     # combine=False: adjacent hits can come from different conversations.
     body = zulip_core.format_messages(messages, include_topic=True, combine=False)
