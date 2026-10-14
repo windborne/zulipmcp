@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "diskcache",
     "fastmcp",
+    "tzdata; sys_platform == 'win32'",
     "zulip",
 ]
 
