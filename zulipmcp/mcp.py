@@ -1426,11 +1426,12 @@ def fetch_image(path: str) -> str:
 
 @mcp.tool()
 def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
-    """Fetch any file from Zulip and save it locally.
+    """Fetch a file uploaded to Zulip and save it locally.
 
     Args:
-        path: File path from message content (e.g. "/user_uploads/...").
+        path: Upload path from message content (e.g. "/user_uploads/...").
         save_dir: Directory to save to. Uses temp dir if not provided.
+            An existing file with the same name is never overwritten.
     """
     try:
         saved_path, size_bytes, content_type = zulip_core.save_file(path, save_dir=save_dir)

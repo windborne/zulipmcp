@@ -1577,11 +1577,35 @@ def get_stream_members(stream: str) -> list[dict]:
     return sorted(members, key=lambda u: u["full_name"])
 
 
-def download_file(path: str) -> tuple[bytes, str]:
-    """Download a file from Zulip. Returns (content_bytes, content_type).
+def _upload_path(path: str) -> str:
+    """Validate a ``/user_uploads/`` path and return it.
 
-    Raises ValueError on any download error.
+    Anything else would turn the authenticated session into a generic GET
+    proxy that bypasses the private-stream allowlist and bot filtering.
     """
+    parts = urllib.parse.urlsplit(path)
+    segments = parts.path.split("/")
+    if (parts.scheme or parts.netloc or parts.query or parts.fragment
+            or not parts.path.startswith("/user_uploads/")
+            or any(urllib.parse.unquote(seg) == ".." for seg in segments)):
+        raise ValueError(f"Only /user_uploads/ paths without a query or '..' can be fetched: {path!r}")
+    return parts.path
+
+
+def _upload_filename(path: str) -> str:
+    """Local filename for an upload path: its basename, never hidden or empty."""
+    name = _upload_path(path).rsplit("/", 1)[-1]
+    if not name or name.startswith(".") or Path(name).name != name:
+        raise ValueError(f"Cannot derive a safe filename from {path!r}")
+    return name
+
+
+def download_file(path: str) -> tuple[bytes, str]:
+    """Download a ``/user_uploads/`` file from Zulip. Returns (content_bytes, content_type).
+
+    Raises ValueError for other paths and on any download error.
+    """
+    path = _upload_path(path)
     client = get_client()
     client.ensure_session()
     if client.session is None:
@@ -1590,8 +1614,6 @@ def download_file(path: str) -> tuple[bytes, str]:
     base = client.base_url.rstrip("/")
     if base.endswith("/api"):
         base = base[:-4]
-    if not path.startswith("/"):
-        path = "/" + path
 
     response = client.session.get(base + path, timeout=30)
     if response.status_code == 403:
@@ -1605,20 +1627,26 @@ def download_file(path: str) -> tuple[bytes, str]:
 
 
 def save_file(path: str, save_dir: Optional[str] = None) -> tuple[str, int, str]:
-    """Download a Zulip file and save it locally.
+    """Download a Zulip file and save it locally without overwriting.
 
-    Returns (saved_path, size_bytes, content_type).
+    Returns (saved_path, size_bytes, content_type). Raises ValueError for
+    invalid paths, download errors, or when the target file already exists.
     """
-    content, content_type = download_file(path)
-    filename = Path(path).name
-
+    filename = _upload_filename(path)
     if save_dir:
         save_path = Path(save_dir) / filename
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        if save_path.exists():
+            raise ValueError(f"File already exists: {save_path}")
     else:
         save_path = Path(tempfile.mkdtemp()) / filename
 
-    save_path.write_bytes(content)
+    content, content_type = download_file(path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(save_path, "xb") as f:
+            f.write(content)
+    except FileExistsError:
+        raise ValueError(f"File already exists: {save_path}") from None
     return str(save_path), len(content), content_type
 
 
