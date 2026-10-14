@@ -1166,7 +1166,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
     if after is not None and before is not None and after >= before:
         raise ValueError("after must be earlier than before")
     client = get_client()
-    limit = max(min(num_messages, 100), 0)
+    limit = min(max(num_messages, 1), 100)
     request: dict = {
         "narrow": narrow + _exclusion_terms(narrow),
         "num_before": limit,
@@ -1200,7 +1200,7 @@ def fetch_narrow(narrow: list[dict], num_messages: int = 20,
     if before is not None:
         cutoff = before.timestamp()
         msgs = [m for m in msgs if m.get("timestamp", 0) < cutoff]
-    page = msgs[-limit:] if limit else []
+    page = msgs[-limit:]
     trimmed = len(page) < len(msgs)
 
     reached_after = False
@@ -1581,6 +1581,8 @@ def get_message_link(message_id: int) -> str:
     if not msg:
         url = f"{base}/#narrow/id/{message_id}"
         return f"[message]({url})"
+    if msg.get("type") == "private":
+        return f"[DM]({base}/#narrow/id/{message_id})"
 
     stream = msg.get("display_recipient", "")
     topic = msg.get("subject", "")

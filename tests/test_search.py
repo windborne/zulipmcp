@@ -210,6 +210,16 @@ def test_anchor_defaults_to_newest(client: FakeClient) -> None:
     assert request["apply_markdown"] is False
 
 
+@pytest.mark.parametrize("num_messages, expected", [(0, 1), (-5, 1), (500, 100)])
+def test_num_messages_is_clamped(client: FakeClient, num_messages: int, expected: int) -> None:
+    client.messages = [stream_msg(1), stream_msg(2)]
+
+    page = core.fetch_narrow([], num_messages=num_messages)
+
+    assert client.requests[0]["num_before"] == expected
+    assert [m["id"] for m in page.messages] == [1, 2][-expected:]
+
+
 def test_anchor_before_message_id_excludes_anchor(client: FakeClient) -> None:
     core.fetch_narrow([], before_message_id=123, before=utc(2025, 3, 1))
 
@@ -535,6 +545,15 @@ def test_get_messages_stream_message_id_includes_it(client: FakeClient) -> None:
     assert 'id="3"' in out and 'id="4"' not in out
 
 
+def test_get_messages_message_id_with_before_message_id(client: FakeClient) -> None:
+    client.messages = [stream_msg(i) for i in range(1, 6)]
+
+    out = get_messages(message_id=5, before_message_id=3)
+
+    assert (client.requests[0]["anchor"], client.requests[0]["include_anchor"]) == (3, False)
+    assert out.startswith("Messages from [public] #general > t:")
+
+
 def test_get_messages_message_id_in_disallowed_private_stream(client: FakeClient) -> None:
     client.messages = [stream_msg(5, stream="secret")]
 
@@ -640,8 +659,7 @@ def test_single_message_tools_deny_dms_without_all(
     assert core.get_message_by_id(5) is None
     assert "private hello" not in _tool("get_message_by_id")(5)
     assert "private hello" not in _tool("verify_message")(5)
-    monkeypatch.setattr(client, "base_url", "https://zulip.example.com/api/", raising=False)
-    assert _tool("get_message_link")(5) == "[message](https://zulip.example.com/#narrow/id/5)"
+    assert _tool("get_message_link")(5) == "Message 5 not found or not accessible."
 
 
 def test_single_message_tools_allow_dms_with_all(
@@ -652,6 +670,8 @@ def test_single_message_tools_allow_dms_with_all(
 
     assert "private hello" in _tool("get_message_by_id")(5)
     assert "private hello" in _tool("verify_message")(5)
+    monkeypatch.setattr(client, "base_url", "https://zulip.example.com/api/", raising=False)
+    assert _tool("get_message_link")(5) == "[DM](https://zulip.example.com/#narrow/id/5)"
 
 
 # --- search_messages ---------------------------------------------------------

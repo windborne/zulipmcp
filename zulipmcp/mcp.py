@@ -916,8 +916,6 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
             dm_with = [r["email"] for r in msg.get("display_recipient", []) if r.get("email")]
         else:
             stream, topic = msg.get("display_recipient", ""), msg.get("subject", "")
-            if not stream or not topic:
-                return f"Message {message_id} not found or not accessible."
 
     if dm_with:
         if not zulip_core.dm_reads_allowed():
@@ -932,7 +930,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         visibility = "private" if zulip_core.is_stream_private(stream) else "public"
         label = f"[{visibility}] #{stream} > {topic}"
 
-    if before_message_id is None and message_id:
+    ends_at_message_id = before_message_id is None and bool(message_id)
+    if ends_at_message_id:
         before_message_id = message_id + 1
     try:
         after_dt, before_dt = _parse_bounds(after, before)
@@ -945,7 +944,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         return f"Error: {e}"
 
     header = f"Messages from {label}:"
-    if message_id:
+    if ends_at_message_id:
         header = f"History for {label} (up to message {message_id}):"
     if page.reached_after:
         header += f"\n(Reached after={after}; nothing older shown.)"
@@ -1053,6 +1052,8 @@ def get_message_link(message_id: int) -> str:
     Args:
         message_id: The message ID.
     """
+    if zulip_core.get_message_by_id(message_id) is None:
+        return f"Message {message_id} not found or not accessible."
     return zulip_core.get_message_link(message_id)
 
 
