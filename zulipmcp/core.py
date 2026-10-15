@@ -669,7 +669,7 @@ _ATTR_ESCAPES = str.maketrans({'"': "&quot;", ">": "&gt;"})
 
 
 def escape_msg_text(text: str) -> str:
-    """Escape message text or a name for output an agent reads."""
+    """Escape text for a <msg> body."""
     return text.translate(_TEXT_ESCAPES)
 
 

@@ -57,7 +57,7 @@ def _setup_logging() -> None:
 
 mcp = FastMCP(
     "Zulip Messaging",
-    instructions='"<" in message text and names is shown as "&lt;"; write "<" in replies and tool arguments.',
+    instructions='Inside <msg> blocks, "<" is shown as "&lt;"; write "<" in replies and tool arguments.',
 )
 
 # Tag every tool that writes to Zulip; run_server() hides them in read-only
