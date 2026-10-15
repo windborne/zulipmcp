@@ -111,18 +111,22 @@ def test_profile_fetched_once(profile: Callable) -> None:
     assert calls == [1]
 
 
-@pytest.mark.parametrize("result", [
-    RuntimeError("network down"),
-    {"result": "error", "msg": "unauthorized"},
-    {"result": "success"},
+@pytest.mark.parametrize("result, retried", [
+    (RuntimeError("network down"), True),
+    ({"result": "error", "msg": "unauthorized"}, True),
+    ({"result": "success"}, False),
 ])
-def test_profile_failure_means_no_unread(profile: Callable, result: Any) -> None:
+def test_profile_failure_means_no_unread(profile: Callable, result: Any, retried: bool) -> None:
     calls = profile(result)
     out = core.format_messages([msg(1, ["mentioned"]), msg(2, [], timestamp=5000)])
 
     assert "unread=" not in out
     assert out.count('mentioned="true"') == 1
     assert calls == [1]
+
+    # A failed lookup isn't cached, so the next call retries; a definitive answer is.
+    core.format_messages([msg(3, [])])
+    assert calls == ([1, 1] if retried else [1])
 
 
 @pytest.mark.parametrize("first, second, unread", [

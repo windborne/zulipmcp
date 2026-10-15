@@ -641,14 +641,20 @@ _account_is_human: Optional[bool] = None
 
 
 def _is_human_account() -> bool:
-    """Whether this client is a human account, from one cached profile GET. False if that fails."""
+    """Whether this client is a human account, from a profile GET cached once it succeeds.
+
+    A failed lookup answers False uncached, so one transient error can't
+    suppress unread markers for the rest of the process.
+    """
     global _account_is_human
     if _account_is_human is None:
         try:
             profile = get_profile()
-            _account_is_human = profile.get("result") == "success" and profile.get("is_bot") is False
         except Exception:
-            _account_is_human = False
+            return False
+        if profile.get("result") != "success":
+            return False
+        _account_is_human = profile.get("is_bot") is False
     return _account_is_human
 
 
@@ -679,6 +685,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
 
     lines = []
     prev_timestamp = None
+    human: Optional[bool] = None  # resolved at most once per call, only if needed
     for msg in messages:
         sender = msg.get("sender_full_name", "Unknown")
         msg_id = msg.get("id", "")
@@ -706,8 +713,11 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         # for them. Event-sourced messages carry no flags: unknown, not unread.
         flags = msg.get("flags")
         if flags is not None:
-            if "read" not in flags and _is_human_account():
-                attrs.append('unread="true"')
+            if "read" not in flags:
+                if human is None:
+                    human = _is_human_account()
+                if human:
+                    attrs.append('unread="true"')
             if _MENTION_FLAGS.intersection(flags):
                 attrs.append('mentioned="true"')
 
