@@ -26,24 +26,28 @@ from dataclasses import dataclass
 
 from fastmcp import FastMCP
 
-# ============================================================================
-# Logging setup — file-based for debugging MCP connection issues
-# ============================================================================
-
-_log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
-_log_dir.mkdir(parents=True, exist_ok=True)
-_log_file = _log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
 _logger = logging.getLogger("zulipmcp")
-_logger.setLevel(logging.DEBUG)
-_file_handler = logging.FileHandler(_log_file)
-_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-_logger.addHandler(_file_handler)
-_logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={_log_file}")
+
+
+def _setup_logging() -> None:
+    """Per-process debug log file plus stderr warnings, for the server only.
+
+    Runs from run_server(), never at import: a library must not configure
+    the importing program's root logger or leave files behind.
+    """
+    if _logger.handlers:  # already set up in this process
+        return
+    log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+    _logger.setLevel(logging.DEBUG)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _logger.addHandler(file_handler)
+    _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={log_file}")
+
+
 from fastmcp.server.context import Context
 
 from . import core as zulip_core
@@ -1499,6 +1503,7 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     With ``ZULIPMCP_READ_ONLY`` on, write tools are hidden and session
     auto-init is skipped (the session tools don't exist in that mode).
     """
+    _setup_logging()
     read_only = zulip_core.is_read_only()
     if read_only:
         _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")

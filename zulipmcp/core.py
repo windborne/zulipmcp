@@ -769,7 +769,9 @@ def format_messages(messages: list[dict], include_topic: bool = False,
 
 def _clip_content(msg: dict, max_chars: int) -> dict:
     """Return msg with content cut to max_chars plus a marker naming the full length."""
-    content = msg.get("content", "")
+    # Escape before cutting: a tag cut short of its ">" is no longer tag-shaped,
+    # so the escape at output would miss the stub.
+    content = escape_msg_tags(msg.get("content", ""))
     if len(content) <= max_chars:
         return msg
     marker = f"… [{len(content)} chars; get_message_by_id has the rest]"
