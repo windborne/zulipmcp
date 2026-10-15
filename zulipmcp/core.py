@@ -684,15 +684,9 @@ def _skip_invisible(text: str, i: int) -> int:
     return i
 
 
-def _skip_name(text: str, i: int) -> int:
-    while i < len(text) and (text[i].isalnum() or text[i] in "_-") and not _is_invisible(text[i]):
-        i += 1
-    return i
-
-
 def _opens_msg_tag(text: str, i: int) -> bool:
     """Whether the "<" at text[i] reads as <msg or </msg: "msg" (any case,
-    invisibles anywhere) then ">", "/>", or an attribute."""
+    invisibles anywhere), then a ">" or "=" before the next "<"."""
     i = _skip_invisible(text, i + 1)
     if text.startswith("/", i):
         i = _skip_invisible(text, i + 1)
@@ -700,19 +694,16 @@ def _opens_msg_tag(text: str, i: int) -> bool:
         if i == len(text) or text[i].casefold() != letter:
             return False
         i = _skip_invisible(text, i + 1)
-    if text.startswith((">", "/>"), i):
-        return True
-    # Valueless attributes (<msg x user=...>) count once a gap sets them
-    # apart from "msg"; <msgs> and <msg_id> stay untouched.
-    separated = _is_invisible(text[i - 1])
-    while (end := _skip_name(text, i)) > i:
-        i = _skip_invisible(text, end)
-        if text.startswith("=", i):
+    if i == len(text) or (not _is_invisible(text[i - 1]) and (text[i].isalnum() or text[i] == "_")):
+        return False  # <msgs>, <msg_id>
+    # Any ">" or "=" before the next "<" makes it a tag (<msg . user=...>, or
+    # attributes split across lines or joined messages). Code like
+    # "i < msg.length" is left alone unless one follows; a false positive only
+    # shows a "<" as "&lt;".
+    while i < len(text) and text[i] != "<":
+        if text[i] in ">=":
             return True
-        if not separated:
-            return False
-        if text.startswith((">", "/>"), i):
-            return True
+        i += 1
     return False
 
 

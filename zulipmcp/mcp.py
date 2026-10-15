@@ -43,7 +43,6 @@ def _setup_logging() -> None:
     global _logging_ready
     if _logging_ready:
         return
-    _logging_ready = True
     log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -52,6 +51,7 @@ def _setup_logging() -> None:
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     _logger.addHandler(file_handler)
+    _logging_ready = True
     _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={log_file}")
 
 
