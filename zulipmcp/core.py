@@ -637,34 +637,41 @@ _MENTION_FLAGS = frozenset({
     "group_mentioned", "wildcard_mentioned",
 })
 
-_account: Optional[tuple[zulip.Client, bool, Optional[int]]] = None
+_account: Optional[tuple[zulip.Client, Optional[int]]] = None  # (client, user_id if human)
 
 
 def _human_user_id() -> Optional[int]:
     """This account's user_id if it is a human account, else None.
 
     The profile GET is cached per client once it succeeds; a failed lookup
-    answers None uncached, so one transient error can't suppress unread
-    markers for the rest of the process.
+    (no config, network, API error) answers None uncached, so one transient
+    error can't suppress unread markers for the rest of the process.
     """
     global _account
-    client = get_client()
-    if _account is None or _account[0] is not client:
-        try:
+    try:
+        client = get_client()
+        if _account is None or _account[0] is not client:
             profile = client.get_profile()
-        except Exception:
-            return None
-        if profile.get("result") != "success":
-            return None
-        _account = (client, profile.get("is_bot") is False, profile.get("user_id"))
-    _, is_human, user_id = _account
-    return user_id if is_human else None
+            if profile.get("result") != "success":
+                return None
+            human = profile.get("is_bot") is False
+            _account = (client, profile.get("user_id") if human else None)
+    except (OSError, zulip.ZulipError):
+        return None
+    return _account[1]
 
 
 # Message text and names are attacker-controlled: an unescaped quote in a
 # name adds attributes, and "<msg"/"</msg" in a body forges whole messages.
-_MSG_TAG_RE = re.compile(r"<(?=\s*/?\s*msg\b)", re.IGNORECASE)
+_INVISIBLE = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"  # whitespace and zero-width format chars
+_MSG_TAG_RE = re.compile(
+    rf"<(?={_INVISIBLE}/?{_INVISIBLE}m{_INVISIBLE}s{_INVISIBLE}g\b)", re.IGNORECASE)
 _ATTR_ESCAPES = str.maketrans({'"': "&quot;", "<": "&lt;", ">": "&gt;"})
+
+
+def escape_msg_tags(text: str) -> str:
+    """Neutralize anything in text that reads as a <msg> or </msg> tag."""
+    return _MSG_TAG_RE.sub("&lt;", text)
 
 
 def _attr(value: Any) -> str:
@@ -681,8 +688,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     include_topic=True adds stream and topic attributes to each <msg> tag, or
     a dm attribute listing participant emails for DMs.
     Messages carrying ``flags`` get mentioned="true" when they mention this
-    account, and unread="true" when a human account hasn't read them; its own
-    messages are never unread.
+    account, and unread="true" when a human account hasn't read them, except
+    on the account's own messages.
     max_chars clips each message's content to that many characters, marking
     the cut with the full length.
 
@@ -748,7 +755,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'reactions="{_attr(reaction_str)}"')
 
         tag_open = "<msg " + " ".join(attrs) + ">"
-        lines.append(f"{tag_open}\n{_MSG_TAG_RE.sub('&lt;', content)}\n</msg>")
+        lines.append(f"{tag_open}\n{escape_msg_tags(content)}\n</msg>")
 
         prev_timestamp = msg.get("time_range_end", timestamp)
 
@@ -774,7 +781,7 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
     current["reactions"] = list(current.get("reactions", []))
 
     for msg in messages[1:]:
-        same_user = msg.get("sender_full_name") == current.get("sender_full_name")
+        same_user = all(msg.get(k) == current.get(k) for k in ("sender_id", "sender_full_name"))
         time_gap = msg.get("timestamp", 0) - current.get("time_range_end", current.get("timestamp", 0))
 
         if same_user and time_gap <= 120:
@@ -783,6 +790,7 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
             current["time_range_end"] = msg.get("timestamp", 0)
             current["id"] = msg.get("id", current["id"])
             current["reactions"].extend(msg.get("reactions", []))
+            # A combined block is unread or mentioned if any part is.
             if "flags" in msg:
                 prev = current.get("flags", msg["flags"])
                 merged = {*prev, *msg["flags"]}
@@ -803,7 +811,7 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
 # ============================================================================
 
 def get_profile() -> dict:
-    """Get this account's own profile. Returns the profile dict from the API."""
+    """Get this account's profile. Returns the profile dict from the API."""
     return get_client().get_profile()
 
 
@@ -1350,15 +1358,15 @@ def get_user_info(email: str) -> Optional[dict]:
 
 
 def get_message_by_id(message_id: int) -> Optional[dict]:
-    """Get a specific message by ID. Returns message dict or None.
+    """Get a message by ID, or None if it doesn't exist or `_is_readable` rejects it.
 
     apply_markdown=False makes the content field raw markdown (consistent
     with get_topic_messages), not rendered HTML. Unlike an anchored
-    get_messages, this endpoint also finds public-channel history the
-    account never received.
+    get_messages, this endpoint finds public-channel history the account
+    never received and never substitutes the nearest message.
     """
     result = get_client().call_endpoint(
-        url=f"messages/{message_id}", method="GET", request={"apply_markdown": False},
+        url=f"/messages/{int(message_id)}", method="GET", request={"apply_markdown": False},
     )
     if result.get("result") != "success" or not result.get("message"):
         return None
@@ -1715,10 +1723,10 @@ def get_events(queue_id: str, last_event_id: int,
         new_last = max(new_last, ev.get("id", new_last))
         if ev.get("type") == "message":
             # Message events carry flags beside the message, not inside it.
+            msg = ev["message"]
             if "flags" in ev:
-                messages.append({**ev["message"], "flags": ev["flags"]})
-            else:
-                messages.append(ev["message"])
+                msg = {**msg, "flags": ev["flags"]}
+            messages.append(msg)
         elif ev.get("type") == "reaction":
             reactions.append(ev)
     return messages, reactions, new_last

@@ -332,7 +332,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
         except (ValueError, TypeError):
             _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
-    header = f"Session context set to {visibility} #{stream} > {topic}"
+    header = zulip_core.escape_msg_tags(f"Session context set to {visibility} #{stream} > {topic}")
 
     msg_count = len(messages)
     header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
@@ -841,7 +841,7 @@ def get_stream_topics(stream: str, limit: int = 20) -> str:
         return f"No topics found in #{stream}."
     lines = [f"Recent topics in #{stream}:"]
     for t in topics:
-        lines.append(f"- {t.get('name', 'Unknown')}")
+        lines.append(zulip_core.escape_msg_tags(f"- {t.get('name', 'Unknown')}"))
     return "\n".join(lines)
 
 
@@ -913,11 +913,11 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         topic: Topic name (optional if message_id given).
         num_messages: Number of messages (default 20, max 100).
         before_message_id: Only messages older than this ID (for pagination).
-        message_id: Fetch messages up to and including this ID. From a Zulip link, use its /near/ or /with/ ID.
+        message_id: Fetch messages up to and including this ID; from a Zulip link, its /near/ or /with/ ID.
         dm_with: Emails of exactly the other DM participants (yourself is implied).
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
-        only: Only messages matching all of these.
+        only: Only messages matching all of these; "unread" needs a human account.
     """
     if dm_with and (stream or topic):
         return "Error: Provide stream+topic or dm_with, not both."
@@ -938,7 +938,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         if not stream or not topic:
             return "Error: Provide stream+topic, dm_with, or message_id."
         visibility = "private" if zulip_core.is_stream_private(stream) else "public"
-        label = f"[{visibility}] #{stream} > {topic}"
+        label = zulip_core.escape_msg_tags(f"[{visibility}] #{stream} > {topic}")
 
     ends_at_message_id = before_message_id is None and bool(message_id)
     if ends_at_message_id:

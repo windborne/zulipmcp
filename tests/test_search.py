@@ -62,7 +62,7 @@ class FakeClient:
     def call_endpoint(self, url: str, method: str, request: dict) -> dict:
         assert method == "GET"
         self.single_reads.append((url, request))
-        hits = [m for m in self.messages if url == f"messages/{m['id']}"]
+        hits = [m for m in self.messages if url == f"/messages/{m['id']}"]
         if not hits:
             return {"result": "error", "msg": "Invalid message(s)"}
         return {"result": "success", "message": dict(hits[0])}
@@ -71,9 +71,6 @@ class FakeClient:
         return {"result": "success", "is_bot": False, "user_id": ME}
 
     def get_messages(self, request: dict) -> dict:
-        if request.get("num_before") == 0 and isinstance(request.get("anchor"), int):
-            hits = [m for m in self.messages if m["id"] == request["anchor"]]
-            return {"result": "success", "messages": [dict(m) for m in hits]}
         self.requests.append(request)
         error = _dm_operand_error(request.get("narrow", []))
         if error:
@@ -700,7 +697,7 @@ def test_get_message_by_id_returns_historical_message(client: FakeClient) -> Non
     msg = core.get_message_by_id(5)
 
     assert (msg["content"], msg["flags"]) == ("from before", ["read", "historical"])
-    assert client.single_reads == [("messages/5", {"apply_markdown": False})]
+    assert client.single_reads == [("/messages/5", {"apply_markdown": False})]
     assert core.get_message_by_id(6) is None
 
 

@@ -108,7 +108,7 @@ def test_own_messages_never_unread(profile: Callable) -> None:
 
 
 @pytest.mark.parametrize("result, retried", [
-    (RuntimeError("network down"), True),
+    (ConnectionError("network down"), True),
     ({"result": "error", "msg": "unauthorized"}, True),
     ({"result": "success"}, False),
 ])
@@ -173,3 +173,22 @@ def test_event_messages_carry_their_flags(profile: Callable, monkeypatch: pytest
     assert last_event_id == 5
     assert "flags" not in first
     assert 'id="1" unread="true" mentioned="true">' in core.format_messages(messages)
+
+
+def test_no_config_formats_without_unread(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing() -> None:
+        raise FileNotFoundError("no zuliprc")
+
+    monkeypatch.setattr(core, "get_client", missing)
+
+    assert 'mentioned="true"' in core.format_messages([msg(1, ["mentioned"])])
+
+
+def test_same_name_different_sender_is_not_combined(profile: Callable) -> None:
+    profile(HUMAN)
+    own, other = msg(1, [], sender_id=1), msg(2, [], timestamp=1060, sender_id=9)
+
+    out = core.format_messages([own, other])
+
+    assert out.count("<msg ") == 2
+    assert out.count('unread="true"') == 1
