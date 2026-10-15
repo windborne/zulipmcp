@@ -1352,22 +1352,17 @@ def get_user_info(email: str) -> Optional[dict]:
 def get_message_by_id(message_id: int) -> Optional[dict]:
     """Get a specific message by ID. Returns message dict or None.
 
-    Uses get_messages with apply_markdown=False so the content field contains
-    raw markdown (consistent with get_topic_messages), not rendered HTML.
+    apply_markdown=False makes the content field raw markdown (consistent
+    with get_topic_messages), not rendered HTML. Unlike an anchored
+    get_messages, this endpoint also finds public-channel history the
+    account never received.
     """
-    result = get_client().get_messages({
-        "anchor": message_id,
-        "num_before": 0,
-        "num_after": 0,
-        "include_anchor": True,
-        "apply_markdown": False,
-    })
-    if result.get("result") != "success" or not result.get("messages"):
+    result = get_client().call_endpoint(
+        url=f"messages/{message_id}", method="GET", request={"apply_markdown": False},
+    )
+    if result.get("result") != "success" or not result.get("message"):
         return None
-    msg = result["messages"][0]
-    # The server substitutes the nearest message when the ID doesn't exist.
-    if msg.get("id") != message_id:
-        return None
+    msg = result["message"]
     if not _is_readable(msg):
         return None
     return msg

@@ -56,7 +56,16 @@ class FakeClient:
             {"name": "noise", "invite_only": False},
         ]
         self.requests: list[dict] = []
+        self.single_reads: list[tuple[str, dict]] = []
         self.response: Optional[dict] = None
+
+    def call_endpoint(self, url: str, method: str, request: dict) -> dict:
+        assert method == "GET"
+        self.single_reads.append((url, request))
+        hits = [m for m in self.messages if url == f"messages/{m['id']}"]
+        if not hits:
+            return {"result": "error", "msg": "Invalid message(s)"}
+        return {"result": "success", "message": dict(hits[0])}
 
     def get_profile(self) -> dict:
         return {"result": "success", "is_bot": False, "user_id": ME}
@@ -685,13 +694,20 @@ def test_get_messages_message_id_in_disallowed_private_stream(client: FakeClient
     assert client.requests == []
 
 
-def test_get_message_by_id_rejects_substituted_message(client: FakeClient) -> None:
-    client.messages = [stream_msg(7)]
+def test_discover_message_context_rejects_substituted_message(client: FakeClient) -> None:
     client.get_messages = lambda request: {"result": "success", "messages": [stream_msg(7)]}
 
-    assert core.get_message_by_id(5) is None
     assert core.discover_message_context(5) is None
-    assert core.get_message_by_id(7)["id"] == 7
+
+
+def test_get_message_by_id_returns_historical_message(client: FakeClient) -> None:
+    client.messages = [{**stream_msg(5, content="from before"), "flags": ["read", "historical"]}]
+
+    msg = core.get_message_by_id(5)
+
+    assert (msg["content"], msg["flags"]) == ("from before", ["read", "historical"])
+    assert client.single_reads == [("messages/5", {"apply_markdown": False})]
+    assert core.get_message_by_id(6) is None
 
 
 def test_discover_message_context_hides_unreadable_stream(

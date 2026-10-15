@@ -66,6 +66,7 @@ _GET_ROUTES: dict[str, dict[str, Any]] = {
     "messages": {"messages": [
         {"id": 1, "type": "stream", "display_recipient": "general", "subject": "t"},
     ]},
+    "messages/1": {"message": {"id": 1, "type": "stream", "display_recipient": "general", "subject": "t"}},
 }
 
 
