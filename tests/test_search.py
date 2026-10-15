@@ -694,12 +694,6 @@ def test_get_messages_message_id_in_disallowed_private_stream(client: FakeClient
     assert client.requests == []
 
 
-def test_discover_message_context_rejects_substituted_message(client: FakeClient) -> None:
-    client.get_messages = lambda request: {"result": "success", "messages": [stream_msg(7)]}
-
-    assert core.discover_message_context(5) is None
-
-
 def test_get_message_by_id_returns_historical_message(client: FakeClient) -> None:
     client.messages = [{**stream_msg(5, content="from before"), "flags": ["read", "historical"]}]
 

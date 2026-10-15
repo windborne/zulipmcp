@@ -1300,19 +1300,8 @@ def check_reactions_on(message_id: int) -> str:
 
 def discover_message_context(message_id: int) -> Optional[tuple[str, str]]:
     """Look up a message by ID and return its (stream, topic), or None for DMs/errors."""
-    result = get_client().get_messages({
-        "anchor": message_id,
-        "num_before": 0,
-        "num_after": 0,
-        "include_anchor": True,
-        "apply_markdown": False,
-    })
-    if result.get("result") != "success" or not result.get("messages"):
-        return None
-    target = result["messages"][0]
-    if target.get("id") != message_id or target.get("type") != "stream":
-        return None
-    if not _is_readable(target):
+    target = get_message_by_id(message_id)
+    if target is None or target.get("type") != "stream":
         return None
     stream = target.get("display_recipient", "")
     topic = target.get("subject", "")
