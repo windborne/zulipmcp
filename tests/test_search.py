@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -160,7 +161,19 @@ def utc(*args: int) -> datetime:
       {"operator": "search", "operand": "x"}]),
     ({"dm_with": [ALICE], "query": "x"},
      [{"operator": "dm", "operand": ALICE}, {"operator": "search", "operand": "x"}]),
-    ({"stream": "", "topic": "", "dm_with": [], "sender": "", "query": ""}, []),
+    ({"stream": "", "topic": "", "dm_with": [], "sender": "", "query": "", "only": [],
+      "dm_including": []}, []),
+    ({"only": ["unread", "mentioned"]},
+     [{"operator": "is", "operand": "unread"}, {"operator": "is", "operand": "mentioned"}]),
+    ({"dm_including": [ALICE, BOB]},
+     [{"operator": "dm-including", "operand": ALICE},
+      {"operator": "dm-including", "operand": BOB}]),
+    ({"stream": "general", "topic": "t", "only": ["starred"]},
+     [{"operator": "channel", "operand": "general"}, {"operator": "topic", "operand": "t"},
+      {"operator": "is", "operand": "starred"}]),
+    ({"dm_including": [ALICE], "query": "x", "only": ["unread"]},
+     [{"operator": "dm-including", "operand": ALICE}, {"operator": "search", "operand": "x"},
+      {"operator": "is", "operand": "unread"}]),
 ])
 def test_build_narrow(kwargs: dict, expected: list[dict]) -> None:
     assert core.build_narrow(**kwargs) == expected
@@ -794,11 +807,25 @@ def test_single_message_tools_allow_dms_with_all(
 
 # --- search_messages ---------------------------------------------------------
 
+NO_SEARCH_TERMS = ("Error: Provide at least one of query, stream, topic, sender, dm_with, "
+                   "dm_including, or only.")
+
 @pytest.mark.parametrize("kwargs, error", [
-    ({}, "Error: Provide at least one of query, stream, topic, sender, or dm_with."),
-    ({"after": "2025-03-01"}, "Error: Provide at least one of query, stream, topic, sender, or dm_with."),
+    ({}, NO_SEARCH_TERMS),
+    ({"after": "2025-03-01"}, NO_SEARCH_TERMS),
     ({"topic": "t"}, "Error: topic requires stream."),
     ({"dm_with": [ALICE], "stream": "general"}, "Error: dm_with cannot be combined with stream/topic."),
+    ({"only": []}, NO_SEARCH_TERMS),
+    ({"dm_including": [ALICE], "dm_with": [BOB]},
+     "Error: dm_including cannot be combined with dm_with or stream/topic."),
+    ({"dm_including": [ALICE], "stream": "general", "topic": "t"},
+     "Error: dm_including cannot be combined with dm_with or stream/topic."),
+    ({"only": ["dm"], "stream": "general"},
+     "Error: only=['dm'] cannot be combined with stream/topic."),
+    ({"only": ["unread", "dm"], "scope": "public"},
+     "Error: scope='public' cannot be combined with dm_including or only=['dm']."),
+    ({"dm_including": [ALICE], "scope": "public"},
+     "Error: scope='public' cannot be combined with dm_including or only=['dm']."),
 ])
 def test_search_validation(client: FakeClient, kwargs: dict, error: str) -> None:
     assert search_messages(**kwargs) == error
@@ -965,3 +992,142 @@ def test_format_messages_dm_attribute() -> None:
     assert "stream=" not in out
     assert "dm=" not in core.format_messages([dm_msg(1, [ALICE, BOT])])
 
+
+
+# --- read filters ------------------------------------------------------------
+
+UNREAD = {"operator": "is", "operand": "unread"}
+MENTIONED = {"operator": "is", "operand": "mentioned"}
+IS_DM = {"operator": "is", "operand": "dm"}
+
+
+def test_read_filters_are_enums_in_tool_schema() -> None:
+    async def schemas() -> dict:
+        return {t.name: t.parameters["properties"] for t in await mcp.mcp.list_tools()}
+
+    props = asyncio.run(schemas())
+    for tool in ("get_messages", "search_messages"):
+        items = props[tool]["only"]["anyOf"][0]["items"]
+        assert items["enum"] == ["unread", "mentioned", "dm", "starred"]
+    assert "dm_including" in props["search_messages"]
+    assert "dm_including" not in props["get_messages"]
+
+
+def test_search_recipe_narrows(dm_reads: FakeClient) -> None:
+    search_messages(only=["unread", "dm"])
+    search_messages(only=["unread", "mentioned"])
+    search_messages(query="x", dm_including=[ALICE, BOB], only=["unread"])
+
+    assert [r["narrow"] for r in dm_reads.requests] == [
+        [UNREAD, IS_DM],
+        [UNREAD, MENTIONED],
+        [{"operator": "dm-including", "operand": ALICE},
+         {"operator": "dm-including", "operand": BOB},
+         {"operator": "search", "operand": "x"}, UNREAD],
+    ]
+
+
+def test_search_non_dm_filter_keeps_default_scope(client: FakeClient) -> None:
+    search_messages(only=["mentioned"])
+    search_messages(only=["starred"], stream="general")
+
+    assert [r["narrow"] for r in client.requests] == [
+        PUBLIC + [MENTIONED],
+        core.build_narrow(stream="general", only=["starred"]),
+    ]
+
+
+@pytest.mark.parametrize("allowlist", [None, "secret"])
+@pytest.mark.parametrize("kwargs", [
+    {"only": ["dm"]},
+    {"only": ["unread", "dm"]},
+    {"only": ["dm"], "scope": "received"},
+    {"dm_including": [ALICE]},
+    {"dm_including": [ALICE], "only": ["unread"]},
+])
+def test_search_dm_filters_denied_without_allow_all(
+    client: FakeClient, monkeypatch: pytest.MonkeyPatch,
+    allowlist: Optional[str], kwargs: dict,
+) -> None:
+    if allowlist is not None:
+        monkeypatch.setenv("BOT_ALLOWED_PRIVATE_STREAMS", allowlist)
+    client.messages = [dm_msg(5, [ALICE, BOT], content="private hello")]
+
+    assert search_messages(**kwargs) == DM_READS_ERROR
+    assert client.requests == []
+
+
+@pytest.mark.parametrize("narrow", [
+    core.build_narrow(only=["dm"]),
+    core.build_narrow(dm_including=[ALICE]),
+    core.build_narrow(stream="general", only=["dm"]),
+    PUBLIC + core.build_narrow(dm_including=[ALICE], only=["unread"]),
+])
+def test_gate_rejects_dm_filter_narrows(client: FakeClient, narrow: list[dict]) -> None:
+    with pytest.raises(core.ReadScopeError) as exc:
+        core.fetch_narrow(narrow)
+    assert f"Error: {exc.value}" == DM_READS_ERROR
+    assert client.requests == []
+
+
+@pytest.mark.parametrize("flag", ["unread", "mentioned", "starred"])
+def test_gate_rejects_unscoped_flag_narrow(client: FakeClient, flag: str) -> None:
+    with pytest.raises(core.ReadScopeError, match=UNSCOPED):
+        core.fetch_narrow(core.build_narrow(only=[flag]))
+    assert search_messages(only=[flag], scope="received").startswith(f"Error: {UNSCOPED}")
+    assert client.requests == []
+
+
+@pytest.mark.parametrize("narrow", [
+    core.build_narrow(only=["unread"]),
+    core.build_narrow(only=["unread", "dm"]),
+    core.build_narrow(dm_including=[ALICE, BOB], only=["mentioned"]),
+])
+def test_gate_passes_filter_narrows_with_allow_all(dm_reads: FakeClient, narrow: list[dict]) -> None:
+    core.fetch_narrow(narrow)
+
+    assert dm_reads.requests[0]["narrow"] == narrow
+
+
+def test_search_dm_filters_return_dms_with_allow_all(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [dm_msg(5, [ALICE, BOT], content="private hello")]
+
+    assert "private hello" in search_messages(only=["unread", "dm"])
+    assert "private hello" in search_messages(dm_including=[ALICE])
+
+
+def test_get_messages_only_filters_conversation(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [stream_msg(1), dm_msg(2, [ALICE, BOT])]
+
+    stream_out = get_messages(stream="general", topic="t", only=["unread", "mentioned"])
+    dm_out = get_messages(dm_with=[ALICE], only=["unread", "dm"])
+    get_messages(message_id=2, only=["starred"])
+
+    assert [r["narrow"] for r in dm_reads.requests] == [
+        core.build_narrow(stream="general", topic="t") + [UNREAD, MENTIONED],
+        [{"operator": "dm", "operand": ALICE}, UNREAD, IS_DM],
+        core.build_narrow(dm_with=[ALICE, BOT], only=["starred"]),
+    ]
+    assert stream_out.startswith("Messages from [public] #general > t:\n")
+    assert dm_out.startswith(f"Messages from DM with {ALICE}:\n")
+
+
+def test_get_messages_only_respects_read_gate(client: FakeClient) -> None:
+    assert get_messages(dm_with=[ALICE], only=["unread"]) == DM_READS_ERROR
+    assert get_messages(stream="secret", topic="t", only=["unread"]) == mcp.PRIVATE_STREAM_ERROR
+    assert client.requests == []
+
+    get_messages(stream="general", topic="t", only=["unread"])
+    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t") + [UNREAD]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"stream": "general", "topic": "t", "only": ["dm"]},
+    {"stream": "general", "topic": "t", "only": ["unread", "dm"]},
+    {"message_id": 1, "only": ["dm"]},
+])
+def test_get_messages_rejects_dm_filter_on_stream(dm_reads: FakeClient, kwargs: dict) -> None:
+    dm_reads.messages = [stream_msg(1)]
+
+    assert get_messages(**kwargs) == "Error: only=['dm'] cannot be combined with stream/topic."
+    assert dm_reads.requests == []

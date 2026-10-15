@@ -815,12 +815,16 @@ _DATE_ANCHOR_FEATURE_LEVEL = 445
 
 def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
                  dm_with: Optional[list[str]] = None, sender: Optional[str] = None,
-                 query: Optional[str] = None, channels: Optional[str] = None) -> list[dict]:
+                 query: Optional[str] = None, channels: Optional[str] = None,
+                 only: Optional[list[str]] = None,
+                 dm_including: Optional[list[str]] = None) -> list[dict]:
     """Build a Zulip narrow from the given filters; empty filters are omitted.
 
     ``dm_with`` selects exactly that DM conversation (self is implied).
     ``query`` is Zulip's server-side keyword search. ``channels="public"``
-    widens a search to the full history of every public channel.
+    widens a search to the full history of every public channel. ``only``
+    adds an ``is`` term per item (e.g. ``unread``) and ``dm_including`` a
+    ``dm-including`` term per email; all terms AND together.
     """
     narrow = []
     if channels:
@@ -833,10 +837,15 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
         # The server accepts a comma-separated email string or a list of user
         # IDs here; a list of emails is rejected.
         narrow.append({"operator": "dm", "operand": ",".join(dm_with)})
+    # The server takes one user per dm-including term.
+    for email in dm_including or []:
+        narrow.append({"operator": "dm-including", "operand": email})
     if sender:
         narrow.append({"operator": "sender", "operand": sender})
     if query:
         narrow.append({"operator": "search", "operand": query})
+    for flag in only or []:
+        narrow.append({"operator": "is", "operand": flag})
     return narrow
 
 
