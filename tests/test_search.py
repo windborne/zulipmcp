@@ -1141,8 +1141,8 @@ def test_get_messages_only_respects_read_gate(client: FakeClient) -> None:
 
 # --- search clipping ---------------------------------------------------------
 
-def clipped(text: str, total: int) -> str:
-    return f"{text}… [{total} chars; get_message_by_id has the rest]"
+def clipped(text: str, total: int, msg_id: int = 1) -> str:
+    return f"{text}… [{total} chars; get_message_by_id({msg_id}) has the rest]"
 
 
 def hit_bodies(out: str) -> list[str]:
@@ -1175,7 +1175,7 @@ def test_search_max_chars_keeps_msg_wrappers(client: FakeClient) -> None:
     ]
     out = search_messages(query="x", max_chars=4)
 
-    assert hit_bodies(out) == [clipped("a <b", 30), "ok"]
+    assert hit_bodies(out) == [clipped("a &lt;b", 30), "ok"]
     tags = [line for line in out.splitlines() if line.startswith("<msg ")]
     assert len(tags) == out.count("\n</msg>") == 2
     assert out.endswith("\n</msg>")
@@ -1187,15 +1187,13 @@ def test_search_rejects_invalid_max_chars(client: FakeClient, max_chars: int) ->
     assert client.requests == []
 
 
-def test_format_messages_does_not_combine_when_clipping(client: FakeClient) -> None:
+def test_format_messages_clips_parts_before_combining(client: FakeClient) -> None:
     msgs = [stream_msg(1, content="first part"), stream_msg(2, timestamp=1060, content="second")]
 
-    assert core.format_messages(msgs).count("<msg ") == 1
     out = core.format_messages(msgs, max_chars=5)
 
-    assert out.count("<msg ") == 2
-    assert f"\n{clipped('first', 10)}\n</msg>" in out
-    assert f"\n{clipped('secon', 6)}\n</msg>" in out
+    assert out.count("<msg ") == 1
+    assert f"\n{clipped('first', 10)}\n\n{clipped('secon', 6, 2)}\n</msg>" in out
 
 
 def test_format_messages_hides_nobots_before_clipping(client: FakeClient) -> None:

@@ -27,7 +27,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
-from zulipmcp.core import escape_msg_tags, filter_for_bot
+from zulipmcp.core import filter_for_bot
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +174,8 @@ def _format_topic_history(messages: list[dict[str, Any]]) -> str | None:
     for message in messages:
         sender = message.get("sender_full_name") or message.get("sender_email") or "Unknown"
         parts.append(
-            f"{escape_msg_tags(str(sender))} (message {message.get('id', '')}):\n"
-            f"{escape_msg_tags(str(message.get('content', '')))}"
+            f"{sender} (message {message.get('id', '')}):\n"
+            f"{message.get('content', '')}"
         )
     return "\n\n".join(parts)
 

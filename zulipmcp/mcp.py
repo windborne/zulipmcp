@@ -55,7 +55,10 @@ def _setup_logging() -> None:
     _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={log_file}")
 
 
-mcp = FastMCP("Zulip Messaging")
+mcp = FastMCP(
+    "Zulip Messaging",
+    instructions='Inside <msg> blocks, "<" is shown as "&lt;"; write "<" in replies and tool arguments.',
+)
 
 # Tag every tool that writes to Zulip; run_server() hides them in read-only
 # mode. Tagging is UX only; _ReadOnlyAdapter (mounted by _ReadOnlyClient)
@@ -339,7 +342,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
         except (ValueError, TypeError):
             _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
-    header = zulip_core.escape_msg_tags(f"Session context set to {visibility} #{stream} > {topic}")
+    header = zulip_core.escape_msg_text(f"Session context set to {visibility} #{stream} > {topic}")
 
     msg_count = len(messages)
     header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
@@ -772,7 +775,7 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
 
     _session.reset()
     _logger.info("end_session() completed")
-    return zulip_core.escape_msg_tags(f"Session ended. Was chatting in #{stream} > {topic}")
+    return f"Session ended. Was chatting in #{stream} > {topic}"
 
 
 # Backwards-compatible alias
@@ -826,7 +829,7 @@ def list_streams(fields: list[str] | None = None) -> str:
                 _format_stream_field(f, s.get(f)) for f in fields
             )
         lines.append(line)
-    return zulip_core.escape_msg_tags(f"Found {len(streams)} streams:\n\n" + "\n".join(lines))
+    return f"Found {len(streams)} streams:\n\n" + "\n".join(lines)
 
 
 @mcp.tool()
@@ -849,7 +852,7 @@ def get_stream_topics(stream: str, limit: int = 20) -> str:
     lines = [f"Recent topics in #{stream}:"]
     for t in topics:
         lines.append(f"- {t.get('name', 'Unknown')}")
-    return zulip_core.escape_msg_tags("\n".join(lines))
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -871,7 +874,7 @@ def get_stream_members(stream: str) -> str:
     lines = [f"#{stream} has {len(members)} member(s):"]
     for u in members:
         lines.append(f"- {u['full_name']} ({u['email']})")
-    return zulip_core.escape_msg_tags("\n".join(lines))
+    return "\n".join(lines)
 
 
 def _parse_when(value: str) -> Optional[datetime]:
@@ -900,7 +903,7 @@ def _dm_label(emails: list[str]) -> str:
     """DM participants other than self, or just self for a self-DM."""
     me = (zulip_core.get_client().email or "").lower()
     others = [e for e in emails if e.lower() != me]
-    return zulip_core.escape_msg_tags("DM with " + ", ".join(others or emails))
+    return "DM with " + ", ".join(others or emails)
 
 
 @mcp.tool()
@@ -945,7 +948,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         if not stream or not topic:
             return "Error: Provide stream+topic, dm_with, or message_id."
         visibility = "private" if zulip_core.is_stream_private(stream) else "public"
-        label = zulip_core.escape_msg_tags(f"[{visibility}] #{stream} > {topic}")
+        label = f"[{visibility}] #{stream} > {topic}"
 
     ends_at_message_id = before_message_id is None and bool(message_id)
     if ends_at_message_id:
@@ -961,6 +964,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
 
     if only:
         label += f" (only {', '.join(only)})"
+    label = zulip_core.escape_msg_text(label)  # sits above <msg> blocks
     header = f"Messages from {label}:"
     if ends_at_message_id:
         header = f"History for {label} (up to message {message_id}):"
@@ -1079,7 +1083,7 @@ def get_message_link(message_id: int) -> str:
     """
     if zulip_core.get_message_by_id(message_id) is None:
         return f"Message {message_id} not found or not accessible."
-    return zulip_core.escape_msg_tags(zulip_core.get_message_link(message_id))
+    return zulip_core.get_message_link(message_id)
 
 
 # ============================================================================
@@ -1398,7 +1402,7 @@ def get_user_info(email: str) -> str:
                 name = field_names.get(field_id, f"Field {field_id}")
                 lines.append(f"{name}: {value}")
 
-    return zulip_core.escape_msg_tags("\n".join(lines))
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1419,7 +1423,7 @@ def resolve_name(query: str) -> str:
         lines.append(f"- {u['full_name']} ({u['email']})")
     if len(matches) == 1:
         lines.append(f"\nTo mention them: @**{matches[0]['full_name']}**")
-    return zulip_core.escape_msg_tags("\n".join(lines))
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1432,7 +1436,7 @@ def get_subscribed_streams() -> str:
     for s in subs:
         visibility = "[private]" if zulip_core.is_stream_private(s["name"]) else "[public]"
         lines.append(f"- {visibility} #{s['name']}")
-    return zulip_core.escape_msg_tags("\n".join(lines))
+    return "\n".join(lines)
 
 
 # ============================================================================
