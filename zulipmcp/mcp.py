@@ -896,17 +896,13 @@ def _dm_label(emails: list[str]) -> str:
     return "DM with " + ", ".join(others or emails)
 
 
-# Zulip "is:" operands offered as read filters.
-ReadFilter = Literal["unread", "mentioned", "dm", "starred"]
-
-
 @mcp.tool()
 def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                  before_message_id: Optional[int] = None,
                  message_id: Optional[int] = None,
                  dm_with: list[str] | None = None,
                  after: str = "", before: str = "",
-                 only: list[ReadFilter] | None = None) -> str:
+                 only: list[Literal["unread", "mentioned", "starred"]] | None = None) -> str:
     """Read one conversation: stream+topic or dm_with.
 
     message_id alone finds its conversation; the page ends at message_id
@@ -921,7 +917,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         dm_with: Emails of exactly the other DM participants (yourself is implied).
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
-        only: Only messages matching all of these, e.g. ["unread"].
+        only: Only messages matching all of these.
     """
     if dm_with and (stream or topic):
         return "Error: Provide stream+topic or dm_with, not both."
@@ -941,8 +937,6 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
     else:
         if not stream or not topic:
             return "Error: Provide stream+topic, dm_with, or message_id."
-        if only and "dm" in only:
-            return "Error: only=['dm'] cannot be combined with stream/topic."
         visibility = "private" if zulip_core.is_stream_private(stream) else "public"
         label = f"[{visibility}] #{stream} > {topic}"
 
@@ -958,6 +952,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
     except ValueError as e:
         return f"Error: {e}"
 
+    if only:
+        label += f" (only {', '.join(only)})"
     header = f"Messages from {label}:"
     if ends_at_message_id:
         header = f"History for {label} (up to message {message_id}):"
@@ -976,14 +972,14 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
                     scope: Literal["received", "public"] | None = None,
                     after: str = "", before: str = "", num_messages: int = 20,
                     before_message_id: Optional[int] = None,
-                    only: list[ReadFilter] | None = None,
+                    only: list[Literal["unread", "mentioned", "dm", "starred"]] | None = None,
                     dm_including: list[str] | None = None,
                     max_chars: Optional[int] = None) -> str:
     """Search messages with Zulip's built-in keyword search.
 
     Returns the most recent matches, oldest first, not ranked by relevance;
-    page back with before_message_id. To find what awaits a reply, search
-    only=["unread", "dm"], then only=["unread", "mentioned"].
+    page back with before_message_id. Awaiting reply (human accounts with DM
+    access): only=["unread","dm"], then only=["unread","mentioned"].
 
     Args:
         query: Keywords; wrap words in double quotes to match a phrase.
@@ -991,34 +987,28 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
         dm_with: Only the DM conversation with exactly these emails.
-        scope: "received" = messages this account received; "public" = full history of all public channels. Default "received" when this server may read DMs (BOT_ALLOWED_PRIVATE_STREAMS=__ALL__), else "public" (private streams then need stream=). Ignored with stream (searches its full history) or a DM filter (dm_with, dm_including, only "dm").
+        scope: "received" = messages this account received; "public" = full history of all public channels. Default "received" when this server may read DMs (BOT_ALLOWED_PRIVATE_STREAMS=__ALL__), else "public" (private streams then need stream=). Ignored with stream, which searches that stream's full history.
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
         num_messages: Max results (default 20, max 100).
         before_message_id: Only messages older than this ID (for paging).
         only: Only messages matching all of these; "dm" = any DM.
-        dm_including: Only DMs whose participants include all these emails.
-        max_chars: Clip each hit to this many characters; set it when scanning many hits.
+        dm_including: Only DMs including all these emails.
+        max_chars: Clip each hit to this many characters, for scanning.
     """
     if max_chars is not None and max_chars < 1:
         return "Error: max_chars must be at least 1."
-    only_dms = bool(only and "dm" in only)
-    if not (query or stream or topic or sender or dm_with or dm_including or only):
-        return ("Error: Provide at least one of query, stream, topic, sender, dm_with, "
-                "dm_including, or only.")
     if topic and not stream:
         return "Error: topic requires stream."
-    if dm_with and stream:
-        return "Error: dm_with cannot be combined with stream/topic."
-    if dm_including and (dm_with or stream):
-        return "Error: dm_including cannot be combined with dm_with or stream/topic."
-    if only_dms and stream:
-        return "Error: only=['dm'] cannot be combined with stream/topic."
-    if scope == "public" and dm_with:
-        return "Error: scope='public' cannot be combined with dm_with."
-    if scope == "public" and (dm_including or only_dms):
-        return "Error: scope='public' cannot be combined with dm_including or only=['dm']."
-    if scope is None and not stream and not (dm_with or dm_including or only_dms):
+    if not (query or stream or sender or dm_with or dm_including or only):
+        return ("Error: Provide at least one of query, stream, sender, dm_with, "
+                "dm_including, or only.")
+    dm_filter = bool(dm_with or dm_including or (only and "dm" in only))
+    if dm_filter and stream:
+        return "Error: dm_with, dm_including and only=['dm'] cannot be combined with stream/topic."
+    if dm_filter and scope == "public":
+        return "Error: scope='public' cannot be combined with dm_with, dm_including or only=['dm']."
+    if scope is None and not stream and not dm_filter:
         scope = "received" if zulip_core.dm_reads_allowed() else "public"
 
     try:

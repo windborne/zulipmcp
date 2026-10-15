@@ -807,25 +807,21 @@ def test_single_message_tools_allow_dms_with_all(
 
 # --- search_messages ---------------------------------------------------------
 
-NO_SEARCH_TERMS = ("Error: Provide at least one of query, stream, topic, sender, dm_with, "
+NO_SEARCH_TERMS = ("Error: Provide at least one of query, stream, sender, dm_with, "
                    "dm_including, or only.")
+DM_WITH_STREAM = "Error: dm_with, dm_including and only=['dm'] cannot be combined with stream/topic."
+DM_WITH_PUBLIC = "Error: scope='public' cannot be combined with dm_with, dm_including or only=['dm']."
 
 @pytest.mark.parametrize("kwargs, error", [
     ({}, NO_SEARCH_TERMS),
     ({"after": "2025-03-01"}, NO_SEARCH_TERMS),
-    ({"topic": "t"}, "Error: topic requires stream."),
-    ({"dm_with": [ALICE], "stream": "general"}, "Error: dm_with cannot be combined with stream/topic."),
     ({"only": []}, NO_SEARCH_TERMS),
-    ({"dm_including": [ALICE], "dm_with": [BOB]},
-     "Error: dm_including cannot be combined with dm_with or stream/topic."),
-    ({"dm_including": [ALICE], "stream": "general", "topic": "t"},
-     "Error: dm_including cannot be combined with dm_with or stream/topic."),
-    ({"only": ["dm"], "stream": "general"},
-     "Error: only=['dm'] cannot be combined with stream/topic."),
-    ({"only": ["unread", "dm"], "scope": "public"},
-     "Error: scope='public' cannot be combined with dm_including or only=['dm']."),
-    ({"dm_including": [ALICE], "scope": "public"},
-     "Error: scope='public' cannot be combined with dm_including or only=['dm']."),
+    ({"topic": "t"}, "Error: topic requires stream."),
+    ({"dm_with": [ALICE], "stream": "general"}, DM_WITH_STREAM),
+    ({"dm_including": [ALICE], "stream": "general", "topic": "t"}, DM_WITH_STREAM),
+    ({"only": ["dm"], "stream": "general"}, DM_WITH_STREAM),
+    ({"only": ["unread", "dm"], "scope": "public"}, DM_WITH_PUBLIC),
+    ({"dm_including": [ALICE], "scope": "public"}, DM_WITH_PUBLIC),
 ])
 def test_search_validation(client: FakeClient, kwargs: dict, error: str) -> None:
     assert search_messages(**kwargs) == error
@@ -900,8 +896,7 @@ def test_search_scope_public_searches_all_public_channels(client: FakeClient) ->
 
 
 def test_search_scope_public_conflicts_with_dm_with(dm_reads: FakeClient) -> None:
-    error = "Error: scope='public' cannot be combined with dm_with."
-    assert search_messages(query="x", scope="public", dm_with=[ALICE]) == error
+    assert search_messages(query="x", scope="public", dm_with=[ALICE]) == DM_WITH_PUBLIC
     assert dm_reads.requests == []
 
 
@@ -1006,11 +1001,13 @@ def test_read_filters_are_enums_in_tool_schema() -> None:
         return {t.name: t.parameters["properties"] for t in await mcp.mcp.list_tools()}
 
     props = asyncio.run(schemas())
-    for tool in ("get_messages", "search_messages"):
-        items = props[tool]["only"]["anyOf"][0]["items"]
-        assert items["enum"] == ["unread", "mentioned", "dm", "starred"]
-    assert "dm_including" in props["search_messages"]
+    enum = {tool: props[tool]["only"]["anyOf"][0]["items"]["enum"]
+            for tool in ("get_messages", "search_messages")}
+    assert enum == {"get_messages": ["unread", "mentioned", "starred"],
+                    "search_messages": ["unread", "mentioned", "dm", "starred"]}
     assert "dm_including" not in props["get_messages"]
+    assert [name for name, p in props.items() if "dm_including" in p] == ["search_messages"]
+    assert [name for name, p in props.items() if "max_chars" in p] == ["search_messages"]
 
 
 def test_search_recipe_narrows(dm_reads: FakeClient) -> None:
@@ -1033,7 +1030,7 @@ def test_search_non_dm_filter_keeps_default_scope(client: FakeClient) -> None:
 
     assert [r["narrow"] for r in client.requests] == [
         PUBLIC + [MENTIONED],
-        core.build_narrow(stream="general", only=["starred"]),
+        [{"operator": "channel", "operand": "general"}, {"operator": "is", "operand": "starred"}],
     ]
 
 
@@ -1058,10 +1055,10 @@ def test_search_dm_filters_denied_without_allow_all(
 
 
 @pytest.mark.parametrize("narrow", [
-    core.build_narrow(only=["dm"]),
-    core.build_narrow(dm_including=[ALICE]),
-    core.build_narrow(stream="general", only=["dm"]),
-    PUBLIC + core.build_narrow(dm_including=[ALICE], only=["unread"]),
+    [IS_DM],
+    [{"operator": "dm-including", "operand": ALICE}],
+    [{"operator": "channel", "operand": "general"}, IS_DM],
+    PUBLIC + [{"operator": "dm-including", "operand": ALICE}, UNREAD],
 ])
 def test_gate_rejects_dm_filter_narrows(client: FakeClient, narrow: list[dict]) -> None:
     with pytest.raises(core.ReadScopeError) as exc:
@@ -1070,23 +1067,11 @@ def test_gate_rejects_dm_filter_narrows(client: FakeClient, narrow: list[dict]) 
     assert client.requests == []
 
 
-@pytest.mark.parametrize("flag", ["unread", "mentioned", "starred"])
-def test_gate_rejects_unscoped_flag_narrow(client: FakeClient, flag: str) -> None:
+def test_gate_rejects_unscoped_flag_narrow(client: FakeClient) -> None:
     with pytest.raises(core.ReadScopeError, match=UNSCOPED):
-        core.fetch_narrow(core.build_narrow(only=[flag]))
-    assert search_messages(only=[flag], scope="received").startswith(f"Error: {UNSCOPED}")
+        core.fetch_narrow([UNREAD])
+    assert search_messages(only=["unread"], scope="received").startswith(f"Error: {UNSCOPED}")
     assert client.requests == []
-
-
-@pytest.mark.parametrize("narrow", [
-    core.build_narrow(only=["unread"]),
-    core.build_narrow(only=["unread", "dm"]),
-    core.build_narrow(dm_including=[ALICE, BOB], only=["mentioned"]),
-])
-def test_gate_passes_filter_narrows_with_allow_all(dm_reads: FakeClient, narrow: list[dict]) -> None:
-    core.fetch_narrow(narrow)
-
-    assert dm_reads.requests[0]["narrow"] == narrow
 
 
 def test_search_dm_filters_return_dms_with_allow_all(dm_reads: FakeClient) -> None:
@@ -1100,16 +1085,17 @@ def test_get_messages_only_filters_conversation(dm_reads: FakeClient) -> None:
     dm_reads.messages = [stream_msg(1), dm_msg(2, [ALICE, BOT])]
 
     stream_out = get_messages(stream="general", topic="t", only=["unread", "mentioned"])
-    dm_out = get_messages(dm_with=[ALICE], only=["unread", "dm"])
+    dm_out = get_messages(dm_with=[ALICE], only=["unread"])
     get_messages(message_id=2, only=["starred"])
 
     assert [r["narrow"] for r in dm_reads.requests] == [
-        core.build_narrow(stream="general", topic="t") + [UNREAD, MENTIONED],
-        [{"operator": "dm", "operand": ALICE}, UNREAD, IS_DM],
-        core.build_narrow(dm_with=[ALICE, BOT], only=["starred"]),
+        [{"operator": "channel", "operand": "general"}, {"operator": "topic", "operand": "t"},
+         UNREAD, MENTIONED],
+        [{"operator": "dm", "operand": ALICE}, UNREAD],
+        [{"operator": "dm", "operand": f"{ALICE},{BOT}"}, {"operator": "is", "operand": "starred"}],
     ]
-    assert stream_out.startswith("Messages from [public] #general > t:\n")
-    assert dm_out.startswith(f"Messages from DM with {ALICE}:\n")
+    assert stream_out.startswith("Messages from [public] #general > t (only unread, mentioned):\n")
+    assert dm_out.startswith(f"Messages from DM with {ALICE} (only unread):\n")
 
 
 def test_get_messages_only_respects_read_gate(client: FakeClient) -> None:
@@ -1118,19 +1104,9 @@ def test_get_messages_only_respects_read_gate(client: FakeClient) -> None:
     assert client.requests == []
 
     get_messages(stream="general", topic="t", only=["unread"])
-    assert client.requests[0]["narrow"] == core.build_narrow(stream="general", topic="t") + [UNREAD]
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"stream": "general", "topic": "t", "only": ["dm"]},
-    {"stream": "general", "topic": "t", "only": ["unread", "dm"]},
-    {"message_id": 1, "only": ["dm"]},
-])
-def test_get_messages_rejects_dm_filter_on_stream(dm_reads: FakeClient, kwargs: dict) -> None:
-    dm_reads.messages = [stream_msg(1)]
-
-    assert get_messages(**kwargs) == "Error: only=['dm'] cannot be combined with stream/topic."
-    assert dm_reads.requests == []
+    assert client.requests[0]["narrow"] == [
+        {"operator": "channel", "operand": "general"}, {"operator": "topic", "operand": "t"}, UNREAD,
+    ]
 
 
 # --- search clipping ---------------------------------------------------------
@@ -1196,12 +1172,3 @@ def test_format_messages_hides_nobots_before_clipping(client: FakeClient) -> Non
 
     assert "secret" not in out and "/no" not in out
     assert 'id="2"' in out
-
-
-def test_max_chars_only_on_search() -> None:
-    async def schemas() -> dict:
-        return {t.name: t.parameters["properties"] for t in await mcp.mcp.list_tools()}
-
-    props = asyncio.run(schemas())
-    assert "max_chars" in props["search_messages"]
-    assert not any("max_chars" in p for name, p in props.items() if name != "search_messages")

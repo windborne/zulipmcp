@@ -896,9 +896,9 @@ def build_narrow(stream: Optional[str] = None, topic: Optional[str] = None,
 
     ``dm_with`` selects exactly that DM conversation (self is implied).
     ``query`` is Zulip's server-side keyword search. ``channels="public"``
-    widens a search to the full history of every public channel. ``only``
-    adds an ``is`` term per item (e.g. ``unread``) and ``dm_including`` a
-    ``dm-including`` term per email; all terms AND together.
+    widens a search to the full history of every public channel.
+    ``only`` items become ``is`` terms and ``dm_including`` emails
+    ``dm-including`` terms; all terms AND.
     """
     narrow = []
     if channels:
