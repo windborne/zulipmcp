@@ -664,8 +664,8 @@ def _human_user_id() -> Optional[int]:
 # Message text and names are attacker-controlled: an unescaped quote in a
 # name adds attributes, and "<msg"/"</msg" in a body forges whole messages.
 # Only tag-shaped text is touched, so code like "i < msg.length" survives.
-# Readers look past whitespace and characters that render as nothing, so the
-# match does too; those are judged by Unicode category, as any list misses some.
+# Readers look past characters that render as nothing, so the match does too;
+# judged by Unicode category because any list misses some.
 _INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Mn", "Me", "Zs", "Zl", "Zp"})
 _BLANKS = frozenset("\u115f\u1160\u3164\uffa0\u2800")  # Hangul fillers, braille blank
 # Unicode tag characters render invisibly but models read them as text. Their
@@ -810,8 +810,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
 
 def _clip_content(msg: dict, max_chars: int) -> dict:
     """Return msg with content cut to max_chars plus a marker naming the full length."""
-    # Escape before cutting: a tag cut short of its ">" is no longer tag-shaped,
-    # so the escape at output would miss the stub.
+    # Escape before cutting: a tag cut short of its ">" isn't tag-shaped anymore.
     content = escape_msg_tags(msg.get("content", ""))
     if len(content) <= max_chars:
         return msg
