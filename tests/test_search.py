@@ -1141,8 +1141,8 @@ def test_get_messages_only_respects_read_gate(client: FakeClient) -> None:
 
 # --- search clipping ---------------------------------------------------------
 
-def clipped(text: str, total: int) -> str:
-    return f"{text}… [{total} chars; get_message_by_id has the rest]"
+def clipped(text: str, total: int, msg_id: int = 1) -> str:
+    return f"{text}… [{total} chars; get_message_by_id({msg_id}) has the rest]"
 
 
 def hit_bodies(out: str) -> list[str]:
@@ -1193,7 +1193,7 @@ def test_format_messages_clips_parts_before_combining(client: FakeClient) -> Non
     out = core.format_messages(msgs, max_chars=5)
 
     assert out.count("<msg ") == 1
-    assert f"\n{clipped('first', 10)}\n\n{clipped('secon', 6)}\n</msg>" in out
+    assert f"\n{clipped('first', 10)}\n\n{clipped('secon', 6, 2)}\n</msg>" in out
 
 
 def test_format_messages_hides_nobots_before_clipping(client: FakeClient) -> None:

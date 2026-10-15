@@ -342,7 +342,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
         except (ValueError, TypeError):
             _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
-    header = f"Session context set to {visibility} #{stream} > {topic}"
+    header = zulip_core.escape_msg_text(f"Session context set to {visibility} #{stream} > {topic}")
 
     msg_count = len(messages)
     header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
@@ -964,6 +964,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
 
     if only:
         label += f" (only {', '.join(only)})"
+    label = zulip_core.escape_msg_text(label)  # sits above <msg> blocks
     header = f"Messages from {label}:"
     if ends_at_message_id:
         header = f"History for {label} (up to message {message_id}):"

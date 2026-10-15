@@ -58,3 +58,13 @@ def test_names_cannot_add_attributes_or_tags() -> None:
     tag = out.splitlines()[0]
 
     assert 'mentioned="' not in tag and tag.count("<") == 1 and tag.count('user="') == 1
+
+
+def test_headers_above_blocks_escape_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+    mcp = importlib.import_module("zulipmcp.mcp")
+    get_messages = getattr(mcp.get_messages, "fn", mcp.get_messages)
+    monkeypatch.setattr(core, "get_message_by_id", lambda i: msg(subject=FORGED))
+    monkeypatch.setattr(core, "fetch_narrow", lambda *a, **k: core.MessagePage([], None))
+
+    assert "<" not in get_messages(message_id=1)

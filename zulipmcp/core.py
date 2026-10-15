@@ -764,7 +764,7 @@ def _clip_content(msg: dict, max_chars: int) -> dict:
     content = msg.get("content", "")
     if len(content) <= max_chars:
         return msg
-    marker = f"… [{len(content)} chars; get_message_by_id has the rest]"
+    marker = f"… [{len(content)} chars; get_message_by_id({msg.get('id')}) has the rest]"
     return {**msg, "content": content[:max(max_chars, 0)] + marker}
 
 
