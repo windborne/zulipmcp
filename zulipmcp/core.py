@@ -632,6 +632,26 @@ def _time_attr(msg: dict, prev_timestamp: Optional[int]) -> str:
     return ""
 
 
+_MENTION_FLAGS = frozenset({
+    "mentioned", "stream_wildcard_mentioned", "topic_wildcard_mentioned",
+    "group_mentioned", "wildcard_mentioned",
+})
+
+_account_is_human: Optional[bool] = None
+
+
+def _is_human_account() -> bool:
+    """Whether this client is a human account, from one cached profile GET. False if that fails."""
+    global _account_is_human
+    if _account_is_human is None:
+        try:
+            profile = get_profile()
+            _account_is_human = profile.get("result") == "success" and profile.get("is_bot") is False
+        except Exception:
+            _account_is_human = False
+    return _account_is_human
+
+
 def format_messages(messages: list[dict], include_topic: bool = False,
                     combine: bool = True) -> str:
     """Format messages as XML <msg> tags.
@@ -640,6 +660,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     Smart timestamps: date shown only when it changes, time shown on 5+ min gaps.
     include_topic=True adds stream and topic attributes to each <msg> tag, or
     a dm attribute listing participant emails for DMs.
+    Messages carrying ``flags`` get mentioned="true" when they mention this
+    account, and unread="true" when unread by a human account.
 
     Note: Messages in /nobots or /nb topics or starting with /nobots or /nb are automatically
     filtered out and will not be shown to the bot.
@@ -680,6 +702,15 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'dm="{emails}"')
         attrs.append(f'id="{msg_id}"')
 
+        # Bots never mark messages read, so unread would tag nearly everything
+        # for them. Event-sourced messages carry no flags: unknown, not unread.
+        flags = msg.get("flags")
+        if flags is not None:
+            if "read" not in flags and _is_human_account():
+                attrs.append('unread="true"')
+            if _MENTION_FLAGS.intersection(flags):
+                attrs.append('mentioned="true"')
+
         # Add reaction summary as attribute if present
         reaction_str = summarize_reactions(msg.get("reactions", []))
         if reaction_str:
@@ -693,8 +724,25 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     return "\n".join(lines)
 
 
+def _merge_flags(current: dict, msg: dict) -> None:
+    """Fold msg's flags into current: read only if both are read, other flags unioned."""
+    if "flags" not in msg:
+        return
+    if "flags" not in current:
+        current["flags"] = list(msg["flags"])
+        return
+    both_read = "read" in current["flags"] and "read" in msg["flags"]
+    merged = dict.fromkeys([*current["flags"], *msg["flags"]])
+    if not both_read:
+        merged.pop("read", None)
+    current["flags"] = list(merged)
+
+
 def _combine_messages(messages: list[dict]) -> list[dict]:
-    """Merge consecutive messages from same user within 2 minutes."""
+    """Merge consecutive messages from same user within 2 minutes.
+
+    A merged block is unread if any part is, and mentioned if any part is.
+    """
     if not messages:
         return []
 
@@ -712,6 +760,7 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
             current["time_range_end"] = msg.get("timestamp", 0)
             current["id"] = msg.get("id", current["id"])
             current["reactions"].extend(msg.get("reactions", []))
+            _merge_flags(current, msg)
         else:
             combined.append(current)
             current = dict(msg)
