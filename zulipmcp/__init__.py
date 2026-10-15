@@ -9,6 +9,8 @@ from .core import (
     resolve_name,
     is_stream_private,
     format_messages,
+    escape_msg_text,
+    escape_msg_attr,
     get_profile,
     list_streams,
     get_stream_topics,
