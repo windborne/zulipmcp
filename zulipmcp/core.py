@@ -666,12 +666,15 @@ def _human_user_id() -> Optional[int]:
 _INVISIBLE = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"  # whitespace and zero-width format chars
 _MSG_TAG_RE = re.compile(
     rf"<(?={_INVISIBLE}/?{_INVISIBLE}m{_INVISIBLE}s{_INVISIBLE}g\b)", re.IGNORECASE)
-_ATTR_ESCAPES = str.maketrans({'"': "&quot;", "<": "&lt;", ">": "&gt;"})
+# Unicode tag characters render invisibly but models read them as text. Their
+# only legitimate use, subdivision flag emoji, degrades to a plain black flag.
+_STRIP_TAG_CHARS = dict.fromkeys(range(0xE0000, 0xE0080))
+_ATTR_ESCAPES = str.maketrans({'"': "&quot;", "<": "&lt;", ">": "&gt;", **_STRIP_TAG_CHARS})
 
 
 def escape_msg_tags(text: str) -> str:
-    """Neutralize anything in text that reads as a <msg> or </msg> tag."""
-    return _MSG_TAG_RE.sub("&lt;", text)
+    """Neutralize anything in text that reads as a <msg> or </msg> tag; drop tag characters."""
+    return _MSG_TAG_RE.sub("&lt;", text.translate(_STRIP_TAG_CHARS))
 
 
 def _attr(value: Any) -> str:

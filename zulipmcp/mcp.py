@@ -982,7 +982,7 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
     access): only=["unread","dm"], then only=["unread","mentioned"].
 
     Args:
-        query: Keywords; wrap words in double quotes to match a phrase.
+        query: Keywords; wrap words in double quotes to match a phrase. Filters like is:unread go in only.
         stream: Only this stream/channel.
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
