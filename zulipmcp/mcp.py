@@ -332,7 +332,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
         except (ValueError, TypeError):
             _logger.warning(f"_init_session: TRIGGER_MESSAGE_ID={trigger_msg_id!r} is not a valid integer, ignoring")
     visibility = "[private]" if zulip_core.is_stream_private(stream) else "[public]"
-    header = f"Session context set to {visibility} #{stream} > {topic}"
+    header = zulip_core.escape_msg_tags(f"Session context set to {visibility} #{stream} > {topic}")
 
     msg_count = len(messages)
     header += f"\n\n--- CONVERSATION HISTORY ({msg_count} most recent messages, oldest first) ---\n"
@@ -813,7 +813,7 @@ def list_streams(fields: list[str] | None = None) -> str:
         visibility = "[private]" if s.get("invite_only", False) else "[public]"
         line = f"- {visibility} #{s['name']}"
         if s.get("description"):
-            line += f": {s['description']}"
+            line += f": {zulip_core.escape_msg_tags(s['description'])}"
         if fields:
             line += " | " + " ".join(
                 _format_stream_field(f, s.get(f)) for f in fields
@@ -841,7 +841,7 @@ def get_stream_topics(stream: str, limit: int = 20) -> str:
         return f"No topics found in #{stream}."
     lines = [f"Recent topics in #{stream}:"]
     for t in topics:
-        lines.append(f"- {t.get('name', 'Unknown')}")
+        lines.append(zulip_core.escape_msg_tags(f"- {t.get('name', 'Unknown')}"))
     return "\n".join(lines)
 
 
@@ -901,7 +901,8 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
                  before_message_id: Optional[int] = None,
                  message_id: Optional[int] = None,
                  dm_with: list[str] | None = None,
-                 after: str = "", before: str = "") -> str:
+                 after: str = "", before: str = "",
+                 only: list[Literal["unread", "mentioned", "starred"]] | None = None) -> str:
     """Read one conversation: stream+topic or dm_with.
 
     message_id alone finds its conversation; the page ends at message_id
@@ -912,10 +913,11 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         topic: Topic name (optional if message_id given).
         num_messages: Number of messages (default 20, max 100).
         before_message_id: Only messages older than this ID (for pagination).
-        message_id: Fetch messages up to and including this ID.
+        message_id: Fetch messages up to and including this ID; from a Zulip link, its /near/ or /with/ ID.
         dm_with: Emails of exactly the other DM participants (yourself is implied).
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
+        only: Only messages matching all of these; "unread" needs a human account.
     """
     if dm_with and (stream or topic):
         return "Error: Provide stream+topic or dm_with, not both."
@@ -936,20 +938,22 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         if not stream or not topic:
             return "Error: Provide stream+topic, dm_with, or message_id."
         visibility = "private" if zulip_core.is_stream_private(stream) else "public"
-        label = f"[{visibility}] #{stream} > {topic}"
+        label = zulip_core.escape_msg_tags(f"[{visibility}] #{stream} > {topic}")
 
     ends_at_message_id = before_message_id is None and bool(message_id)
     if ends_at_message_id:
         before_message_id = message_id + 1
     try:
         page = zulip_core.fetch_narrow(
-            zulip_core.build_narrow(stream=stream, topic=topic, dm_with=dm_with),
+            zulip_core.build_narrow(stream=stream, topic=topic, dm_with=dm_with, only=only),
             num_messages=num_messages, before_message_id=before_message_id,
             after=_parse_when(after), before=_parse_when(before),
         )
     except ValueError as e:
         return f"Error: {e}"
 
+    if only:
+        label += f" (only {', '.join(only)})"
     header = f"Messages from {label}:"
     if ends_at_message_id:
         header = f"History for {label} (up to message {message_id}):"
@@ -967,14 +971,18 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
                     sender: str = "", dm_with: list[str] | None = None,
                     scope: Literal["received", "public"] | None = None,
                     after: str = "", before: str = "", num_messages: int = 20,
-                    before_message_id: Optional[int] = None) -> str:
+                    before_message_id: Optional[int] = None,
+                    only: list[Literal["unread", "mentioned", "dm", "starred"]] | None = None,
+                    dm_including: list[str] | None = None,
+                    max_chars: Optional[int] = None) -> str:
     """Search messages with Zulip's built-in keyword search.
 
     Returns the most recent matches, oldest first, not ranked by relevance;
-    page back with before_message_id.
+    page back with before_message_id. Awaiting reply (human accounts with DM
+    access): only=["unread","dm"], then only=["unread","mentioned"].
 
     Args:
-        query: Keywords; wrap words in double quotes to match a phrase.
+        query: Keywords; wrap words in double quotes to match a phrase. Filters like is:unread go in only.
         stream: Only this stream/channel.
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
@@ -984,22 +992,30 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
         num_messages: Max results (default 20, max 100).
         before_message_id: Only messages older than this ID (for paging).
+        only: Only messages matching all of these; "dm" = any DM.
+        dm_including: Only DMs including all these emails.
+        max_chars: Clip each hit to this many characters, for scanning.
     """
-    if not (query or stream or topic or sender or dm_with):
-        return "Error: Provide at least one of query, stream, topic, sender, or dm_with."
+    if max_chars is not None and max_chars < 1:
+        return "Error: max_chars must be at least 1."
     if topic and not stream:
         return "Error: topic requires stream."
-    if dm_with and stream:
-        return "Error: dm_with cannot be combined with stream/topic."
-    if scope == "public" and dm_with:
-        return "Error: scope='public' cannot be combined with dm_with."
-    if scope is None and not stream and not dm_with:
+    if not (query or stream or sender or dm_with or dm_including or only):
+        return ("Error: Provide at least one of query, stream, sender, dm_with, "
+                "dm_including, or only.")
+    dm_filter = bool(dm_with or dm_including or (only and "dm" in only))
+    if dm_filter and stream:
+        return "Error: dm_with, dm_including and only=['dm'] cannot be combined with stream/topic."
+    if dm_filter and scope == "public":
+        return "Error: scope='public' cannot be combined with dm_with, dm_including or only=['dm']."
+    if scope is None and not stream and not dm_filter:
         scope = "received" if zulip_core.dm_reads_allowed() else "public"
 
     try:
         narrow = zulip_core.build_narrow(
             stream=stream, topic=topic, dm_with=dm_with, sender=sender, query=query,
             channels="public" if scope == "public" and not stream else None,
+            only=only, dm_including=dm_including,
         )
         page = zulip_core.fetch_narrow(
             narrow, num_messages=num_messages, before_message_id=before_message_id,
@@ -1021,7 +1037,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         status += "; also searchable: " + ", ".join(f"stream={s}" for s in allowlisted)
     header = f"Search as {zulip_core.get_client().email} ({status})"
     # combine=False: adjacent hits can come from different conversations.
-    body = zulip_core.format_messages(messages, include_topic=True, combine=False)
+    body = zulip_core.format_messages(messages, include_topic=True, combine=False,
+                                      max_chars=max_chars)
     return header + ("\n\n" + body if body else "")
 
 
@@ -1400,7 +1417,7 @@ def resolve_name(query: str) -> str:
 
 @mcp.tool()
 def get_subscribed_streams() -> str:
-    """Get streams the bot is subscribed to."""
+    """Get streams this account is subscribed to."""
     subs = zulip_core.get_subscribed_streams()
     if not subs:
         return "Not subscribed to any streams."
