@@ -686,7 +686,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     if not messages:
         return ""
 
-    # Clip before combining so each marker names its own message.
+    # Clip before combining so each marker counts its own message.
     if max_chars is not None:
         messages = [_clip_content(m, max_chars) for m in messages]
 
@@ -749,7 +749,7 @@ def _clip_content(msg: dict, max_chars: int) -> dict:
     content = msg.get("content", "")
     if len(content) <= max_chars:
         return msg
-    marker = f"… [{len(content)} chars; get_message_by_id({msg.get('id', '')}) returns the rest]"
+    marker = f"… [{len(content)} chars; get_message_by_id has the rest]"
     return {**msg, "content": content[:max_chars] + marker}
 
 
