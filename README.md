@@ -238,7 +238,7 @@ The typing indicator starts on `set_context()` and after every `reply()`, and st
 
 ### Reading history and search
 
-`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search over a `stream`, everything this account received (`scope="received"`), or all public channels (`scope="public"`, the default without `__ALL__`). Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+). Both filter with `only` (`unread`, `mentioned`, `starred`, plus `dm` on search; ANDed); `search_messages` adds `dm_including` and `max_chars`, which clips each hit and points to `get_message_by_id` for the rest. History and search results are tagged `mentioned="true"` when they mention this account and, on human accounts, `unread="true"`.
+`get_messages` reads one conversation (stream+topic, `dm_with`, or up to a `message_id`); `search_messages` wraps Zulip's native keyword search over a `stream`, everything this account received (`scope="received"`), or all public channels (`scope="public"`, the default without `__ALL__`). Both page backward with the `before_message_id` each response names and accept ISO 8601 `after`/`before` bounds (`before` needs Zulip 12.0+). Both filter with `only` (`unread`, `mentioned`, `starred`, plus `dm` on search; ANDed); `search_messages` adds `dm_including` and `max_chars`, which clips each hit and points to `get_message_by_id` for the rest. Formatted messages are tagged `mentioned="true"` when they mention this account and, on human accounts, `unread="true"`.
 
 ### Bot visibility filtering
 
