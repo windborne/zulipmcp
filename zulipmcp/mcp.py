@@ -913,7 +913,7 @@ def get_messages(stream: str = "", topic: str = "", num_messages: int = 20,
         topic: Topic name (optional if message_id given).
         num_messages: Number of messages (default 20, max 100).
         before_message_id: Only messages older than this ID (for pagination).
-        message_id: Fetch messages up to and including this ID.
+        message_id: Fetch messages up to and including this ID. From a Zulip link, use its /near/ or /with/ ID.
         dm_with: Emails of exactly the other DM participants (yourself is implied).
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
