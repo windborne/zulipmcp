@@ -25,18 +25,25 @@ from typing import Literal, Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
+from fastmcp.server.context import Context
+
+from . import core as zulip_core
 
 _logger = logging.getLogger("zulipmcp")
+_logging_ready = False
 
 
 def _setup_logging() -> None:
-    """Per-process debug log file plus stderr warnings, for the server only.
+    """Log zulipmcp at DEBUG to a per-process file and, via root, to stderr;
+    other loggers' warnings go to stderr.
 
-    Runs from run_server(), never at import: a library must not configure
+    Runs from run_server() only, never at import: a library must not configure
     the importing program's root logger or leave files behind.
     """
-    if _logger.handlers:  # already set up in this process
+    global _logging_ready
+    if _logging_ready:
         return
+    _logging_ready = True
     log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -47,10 +54,6 @@ def _setup_logging() -> None:
     _logger.addHandler(file_handler)
     _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={log_file}")
 
-
-from fastmcp.server.context import Context
-
-from . import core as zulip_core
 
 mcp = FastMCP("Zulip Messaging")
 
