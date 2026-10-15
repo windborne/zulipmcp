@@ -62,6 +62,7 @@ _GET_ROUTES: dict[str, dict[str, Any]] = {
     "streams": {"streams": [{"name": "general", "invite_only": False}]},
     "get_stream_id": {"stream_id": 7},
     "users/me/subscriptions": {"subscriptions": []},
+    "users/me": {"user_id": 3, "is_bot": False},
     "messages": {"messages": [
         {"id": 1, "type": "stream", "display_recipient": "general", "subject": "t"},
     ]},
@@ -188,6 +189,18 @@ def test_read_only_get_reaches_transport(
 
     with pytest.raises(core.ReadOnlyError):
         client.call_endpoint(url="messages", method="post")
+    assert all(method == "GET" for method, _ in transport)
+
+
+def test_read_only_unread_marker_fetches_profile_with_get(
+    transport: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1")
+    monkeypatch.setattr(core, "_account_is_human", None)
+    msg = {"id": 1, "timestamp": 0, "type": "stream", "content": "hi", "flags": []}
+
+    assert 'unread="true"' in core.format_messages([msg])
+    assert transport[-1] == ("GET", "users/me")
     assert all(method == "GET" for method, _ in transport)
 
 
