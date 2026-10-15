@@ -662,9 +662,13 @@ def _human_user_id() -> Optional[int]:
 
 # Message text and names are attacker-controlled: an unescaped quote in a
 # name adds attributes, and "<msg"/"</msg" in a body forges whole messages.
-_INVISIBLE = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"  # whitespace and zero-width format chars
+# Only tag-shaped text is touched (msg then ">" or an attribute), so code like
+# "i < msg.length" survives.
+_INVISIBLE = (r"[\s\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069"
+              r"\u3164\ufe00-\ufe0f\ufeff]*")  # whitespace, zero-width and bidi format chars
 _MSG_TAG_RE = re.compile(
-    rf"<(?={_INVISIBLE}/?{_INVISIBLE}m{_INVISIBLE}s{_INVISIBLE}g\b)", re.IGNORECASE)
+    rf"<(?={_INVISIBLE}/?{_INVISIBLE}m{_INVISIBLE}s{_INVISIBLE}g{_INVISIBLE}(?:/?>|[\w-]+{_INVISIBLE}=))",
+    re.IGNORECASE)
 # Unicode tag characters render invisibly but models read them as text. Their
 # only legitimate use, subdivision flag emoji, degrades to a plain black flag.
 _STRIP_TAG_CHARS = dict.fromkeys(range(0xE0000, 0xE0080))
@@ -769,7 +773,7 @@ def _clip_content(msg: dict, max_chars: int) -> dict:
     if len(content) <= max_chars:
         return msg
     marker = f"… [{len(content)} chars; get_message_by_id has the rest]"
-    return {**msg, "content": content[:max_chars] + marker}
+    return {**msg, "content": content[:max(max_chars, 0)] + marker}
 
 
 def _combine_messages(messages: list[dict]) -> list[dict]:

@@ -813,7 +813,7 @@ def list_streams(fields: list[str] | None = None) -> str:
         visibility = "[private]" if s.get("invite_only", False) else "[public]"
         line = f"- {visibility} #{s['name']}"
         if s.get("description"):
-            line += f": {s['description']}"
+            line += f": {zulip_core.escape_msg_tags(s['description'])}"
         if fields:
             line += " | " + " ".join(
                 _format_stream_field(f, s.get(f)) for f in fields
