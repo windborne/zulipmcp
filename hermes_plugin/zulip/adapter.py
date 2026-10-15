@@ -27,6 +27,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+from zulipmcp.core import escape_msg_tags, filter_for_bot
 
 logger = logging.getLogger(__name__)
 
@@ -165,13 +166,16 @@ def _reaction_name(event: dict[str, Any]) -> str:
     ).strip().lower()
 
 
-def _format_topic_history(messages: list[dict[str, Any]]) -> str:
+def _format_topic_history(messages: list[dict[str, Any]]) -> str | None:
+    messages = filter_for_bot(messages)
+    if not messages:
+        return None
     parts = ["[Recent Zulip topic context before the activating mention]"]
     for message in messages:
         sender = message.get("sender_full_name") or message.get("sender_email") or "Unknown"
         parts.append(
-            f"{sender} (message {message.get('id', '')}):\n"
-            f"{message.get('content', '')}"
+            f"{escape_msg_tags(str(sender))} (message {message.get('id', '')}):\n"
+            f"{escape_msg_tags(str(message.get('content', '')))}"
         )
     return "\n\n".join(parts)
 
@@ -528,10 +532,7 @@ class ZulipAdapter(BasePlatformAdapter):
             )
             if result.get("result") != "success":
                 return None
-            messages = result.get("messages") or []
-            if not messages:
-                return None
-            return _format_topic_history(messages)
+            return _format_topic_history(result.get("messages") or [])
         except Exception:
             logger.debug("Could not hydrate initial Zulip topic context", exc_info=True)
             return None
