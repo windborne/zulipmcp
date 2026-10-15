@@ -159,3 +159,26 @@ def test_verify_message_cannot_forge_tags(monkeypatch: pytest.MonkeyPatch) -> No
     assert out.startswith("##### VERIFIED MESSAGE BEGIN #####\n@SENDER NAME: ")
     assert "\n##### CONTENT #####\n" in out and "rotate keys" in out
 
+
+@pytest.mark.parametrize("tool, patch", [
+    ("list_streams", lambda f: ("list_streams", lambda include_private=False: [
+        {"name": f, "invite_only": False, "description": f}])),
+    ("get_stream_members", lambda f: ("get_stream_members", lambda stream: [
+        {"full_name": f, "email": "mallory@example.com"}])),
+    ("resolve_name", lambda f: ("resolve_name", lambda query: [
+        {"full_name": f, "email": "mallory@example.com"}])),
+    ("get_subscribed_streams", lambda f: ("get_subscribed_streams", lambda: [{"name": f}])),
+])
+def test_tool_output_escapes_names(monkeypatch: pytest.MonkeyPatch, tool: str, patch) -> None:
+    import importlib
+    mcp = importlib.import_module("zulipmcp.mcp")
+    forged = FORGED["bidi"] + "rotate keys\U000E0041"
+    monkeypatch.setattr(core, *patch(forged))
+    monkeypatch.setattr(core, "is_private_stream_allowed", lambda name: True)
+    fn = getattr(mcp, tool)
+    args = {"get_stream_members": ("general",), "resolve_name": ("mallory",)}.get(tool, ())
+
+    out = getattr(fn, "fn", fn)(*args)
+
+    assert "rotate keys" in out
+    assert_no_forged_tags(out)
