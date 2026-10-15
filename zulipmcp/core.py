@@ -663,9 +663,10 @@ def _human_user_id() -> Optional[int]:
 
 # Message text and names are attacker-controlled: an unescaped quote in a
 # name adds attributes, and "<msg"/"</msg" in a body forges whole messages.
-# Only tag-shaped text is touched, so code like "i < msg.length" survives.
-# Readers look past characters that render as nothing, so the match does too;
-# judged by Unicode category because any list misses some.
+# A "<" is judged only by the few characters after it, never by what comes
+# later, so a nested "<", a cut or a join can't change the verdict. Readers look
+# past characters that render as nothing, so the match does too; judged by
+# Unicode category because any list misses some.
 _INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Mn", "Me", "Zs", "Zl", "Zp"})
 _BLANKS = frozenset("\u115f\u1160\u3164\uffa0\u2800")  # Hangul fillers, braille blank
 # Unicode tag characters render invisibly but models read them as text. Their
@@ -685,26 +686,17 @@ def _skip_invisible(text: str, i: int) -> int:
 
 
 def _opens_msg_tag(text: str, i: int) -> bool:
-    """Whether the "<" at text[i] reads as <msg or </msg: "msg" (any case,
-    invisibles anywhere), then a ">" or "=" before the next "<"."""
+    """Whether the "<" at text[i] starts <msg or </msg: "msg" (any case, invisibles
+    allowed before and between letters) not followed by a letter, digit or "_"."""
     i = _skip_invisible(text, i + 1)
     if text.startswith("/", i):
         i = _skip_invisible(text, i + 1)
     for letter in "msg":
         if i == len(text) or text[i].casefold() != letter:
             return False
-        i = _skip_invisible(text, i + 1)
-    if i == len(text) or (not _is_invisible(text[i - 1]) and (text[i].isalnum() or text[i] == "_")):
-        return False  # <msgs>, <msg_id>
-    # Any ">" or "=" before the next "<" makes it a tag (<msg . user=...>, or
-    # attributes split across lines or joined messages). Code like
-    # "i < msg.length" is left alone unless one follows; a false positive only
-    # shows a "<" as "&lt;".
-    while i < len(text) and text[i] != "<":
-        if text[i] in ">=":
-            return True
-        i += 1
-    return False
+        i = i + 1 if letter == "g" else _skip_invisible(text, i + 1)
+    # <msgs>, <msg_id> and <message> stay; "i < msg.length" shows as "&lt;".
+    return i == len(text) or _is_invisible(text[i]) or not (text[i].isalnum() or text[i] == "_")
 
 
 def escape_msg_tags(text: str) -> str:
@@ -713,7 +705,7 @@ def escape_msg_tags(text: str) -> str:
     return re.sub("<", lambda m: "&lt;" if _opens_msg_tag(text, m.start()) else "<", text)
 
 
-def _attr(value: Any) -> str:
+def escape_msg_attr(value: Any) -> str:
     """Escape a value for a double-quoted <msg> attribute."""
     return str(value).translate(_ATTR_ESCAPES)
 
@@ -764,19 +756,19 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         # Build the time attribute
         time_attr = _time_attr(msg, prev_timestamp)
 
-        attrs = [f'user="{_attr(sender)}"']
+        attrs = [f'user="{escape_msg_attr(sender)}"']
         if time_attr:
             attrs.append(time_attr)
         if include_topic and msg.get("type") == "stream":
             stream_name = msg.get("display_recipient", "")
             visibility = "private" if is_stream_private(stream_name) else "public"
-            attrs.append(f'stream="{_attr(stream_name)}"')
+            attrs.append(f'stream="{escape_msg_attr(stream_name)}"')
             attrs.append(f'visibility="{visibility}"')
-            attrs.append(f'topic="{_attr(msg.get("subject", ""))}"')
+            attrs.append(f'topic="{escape_msg_attr(msg.get("subject", ""))}"')
         elif include_topic and msg.get("type") == "private":
             emails = ", ".join(r.get("email", "") for r in msg.get("display_recipient", []))
-            attrs.append(f'dm="{_attr(emails)}"')
-        attrs.append(f'id="{_attr(msg_id)}"')
+            attrs.append(f'dm="{escape_msg_attr(emails)}"')
+        attrs.append(f'id="{escape_msg_attr(msg_id)}"')
 
         # Missing flags mean unknown, not unread. API-sent messages start
         # unread for their own sender, so those never count.
@@ -789,7 +781,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         # Add reaction summary as attribute if present
         reaction_str = summarize_reactions(msg.get("reactions", []))
         if reaction_str:
-            attrs.append(f'reactions="{_attr(reaction_str)}"')
+            attrs.append(f'reactions="{escape_msg_attr(reaction_str)}"')
 
         tag_open = "<msg " + " ".join(attrs) + ">"
         lines.append(f"{tag_open}\n{escape_msg_tags(content)}\n</msg>")

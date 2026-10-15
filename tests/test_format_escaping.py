@@ -72,9 +72,31 @@ def test_body_cannot_close_or_open_a_msg_tag(body: str) -> None:
 
 
 def test_body_keeps_other_markup() -> None:
-    body = "<b>bold</b> a < b && <message> <msgs> i < msg.length <msg_id> < msg"
+    body = "<b>bold</b> a < b && <message> <msgs> <msg_id> <Msgbox>"
 
     assert f"\n{body}\n" in core.format_messages([msg(body)])
+
+
+@pytest.mark.parametrize("text", [
+    "i < msg.length", "< msg", "<msg<b> user=\"Alice\">", "</msg <msg>",
+    "<msg user<!---->=\"Alice\">", "<msg\u200bs>",
+])
+def test_every_msg_token_is_neutralized(text: str) -> None:
+    # The verdict depends only on the characters right after "<", so nothing
+    # later in the text can flip it; code like "i < msg.length" pays cosmetically.
+    assert "<" not in core.escape_msg_tags(text).replace("<b>", "").replace("<!---->", "")
+
+
+def test_escape_is_a_fixpoint() -> None:
+    import random
+    rng = random.Random(0)
+    alphabet = ["<", "/", "m", "s", "g", "M", ">", "=", " ", "\n", "\u200b", "\u202e", "\u1160",
+                "_", "x", "\"", "&", "lt;", "\U000e0041"]
+    for _ in range(20_000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 14)))
+        once = core.escape_msg_tags(text)
+        assert core.escape_msg_tags(once) == once
+        assert not _SEEN_TAG.search(seen(once).replace("&lt;", ""))
 
 
 @pytest.mark.parametrize("field, value", [
