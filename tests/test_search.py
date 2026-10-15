@@ -1131,3 +1131,77 @@ def test_get_messages_rejects_dm_filter_on_stream(dm_reads: FakeClient, kwargs: 
 
     assert get_messages(**kwargs) == "Error: only=['dm'] cannot be combined with stream/topic."
     assert dm_reads.requests == []
+
+
+# --- search clipping ---------------------------------------------------------
+
+def clipped(text: str, total: int, msg_id: int = 1) -> str:
+    return f"{text}… [{total} chars; get_message_by_id({msg_id}) returns the rest]"
+
+
+def hit_bodies(out: str) -> list[str]:
+    """Content between each <msg ...> line and its </msg>."""
+    body = out.split("\n\n", 1)[1]
+    blocks = body.split("\n</msg>")
+    assert blocks[-1] == ""
+    return [block.lstrip("\n").split("\n", 1)[1] for block in blocks[:-1]]
+
+
+@pytest.mark.parametrize("content, max_chars, expected", [
+    ("hello", 10, "hello"),
+    ("hello", 5, "hello"),
+    ("hello world", 5, clipped("hello", 11)),
+    ("héllo wörld", 4, clipped("héll", 11)),
+    ("🎉🎉🎉ok", 2, clipped("🎉🎉", 5)),
+    ("日本語のテキスト", 3, clipped("日本語", 8)),
+    ("hi", None, "hi"),
+])
+def test_search_max_chars(
+    client: FakeClient, content: str, max_chars: Optional[int], expected: str,
+) -> None:
+    client.messages = [stream_msg(1, content=content)]
+
+    assert hit_bodies(search_messages(query="x", max_chars=max_chars)) == [expected]
+
+
+def test_search_max_chars_keeps_msg_wrappers(client: FakeClient) -> None:
+    client.messages = [
+        stream_msg(1, content="a <b>bold</b> line\nsecond line"),
+        stream_msg(2, timestamp=1030, content="ok"),
+    ]
+    out = search_messages(query="x", max_chars=4)
+
+    assert hit_bodies(out) == [clipped("a <b", 30), "ok"]
+    tags = [line for line in out.splitlines() if line.startswith("<msg ")]
+    assert len(tags) == out.count("\n</msg>") == 2
+    assert out.endswith("\n</msg>")
+
+
+@pytest.mark.parametrize("max_chars", [0, -5])
+def test_search_rejects_invalid_max_chars(client: FakeClient, max_chars: int) -> None:
+    assert search_messages(query="x", max_chars=max_chars) == "Error: max_chars must be at least 1."
+    assert client.requests == []
+
+
+def test_format_messages_clips_parts_before_combining(client: FakeClient) -> None:
+    msgs = [stream_msg(1, content="first part"), stream_msg(2, timestamp=1060, content="second")]
+    out = core.format_messages(msgs, max_chars=5)
+
+    assert out.count("<msg ") == 1
+    assert f"{clipped('first', 10, 1)}\n\n{clipped('secon', 6, 2)}\n</msg>" in out
+
+
+def test_format_messages_hides_nobots_before_clipping(client: FakeClient) -> None:
+    out = core.format_messages([stream_msg(1, content="/nobots secret"), stream_msg(2)], max_chars=3)
+
+    assert "secret" not in out and "/no" not in out
+    assert 'id="2"' in out
+
+
+def test_max_chars_only_on_search() -> None:
+    async def schemas() -> dict:
+        return {t.name: t.parameters["properties"] for t in await mcp.mcp.list_tools()}
+
+    props = asyncio.run(schemas())
+    assert "max_chars" in props["search_messages"]
+    assert not any("max_chars" in p for name, p in props.items() if name != "search_messages")

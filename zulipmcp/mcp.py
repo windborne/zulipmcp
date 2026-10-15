@@ -977,7 +977,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
                     after: str = "", before: str = "", num_messages: int = 20,
                     before_message_id: Optional[int] = None,
                     only: list[ReadFilter] | None = None,
-                    dm_including: list[str] | None = None) -> str:
+                    dm_including: list[str] | None = None,
+                    max_chars: Optional[int] = None) -> str:
     """Search messages with Zulip's built-in keyword search.
 
     Returns the most recent matches, oldest first, not ranked by relevance;
@@ -990,14 +991,17 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         topic: Only this topic (requires stream).
         sender: Only messages from this email.
         dm_with: Only the DM conversation with exactly these emails.
-        scope: "received" = messages this account received; "public" = full history of all public channels. Default "received" when this server may read DMs (BOT_ALLOWED_PRIVATE_STREAMS=__ALL__), else "public" (private streams then need stream=). Ignored with stream, which searches that stream's full history.
+        scope: "received" = messages this account received; "public" = full history of all public channels. Default "received" when this server may read DMs (BOT_ALLOWED_PRIVATE_STREAMS=__ALL__), else "public" (private streams then need stream=). Ignored with stream (searches its full history) or a DM filter (dm_with, dm_including, only "dm").
         after: Only messages at or after this ISO 8601 date/datetime; without an offset, in the timezone shown on timestamps.
         before: Only messages before this ISO 8601 date/datetime (Zulip 12.0+); without an offset, in the timezone shown on timestamps.
         num_messages: Max results (default 20, max 100).
         before_message_id: Only messages older than this ID (for paging).
         only: Only messages matching all of these; "dm" = any DM.
         dm_including: Only DMs whose participants include all these emails.
+        max_chars: Clip each hit to this many characters; set it when scanning many hits.
     """
+    if max_chars is not None and max_chars < 1:
+        return "Error: max_chars must be at least 1."
     only_dms = bool(only and "dm" in only)
     if not (query or stream or topic or sender or dm_with or dm_including or only):
         return ("Error: Provide at least one of query, stream, topic, sender, dm_with, "
@@ -1043,7 +1047,8 @@ def search_messages(query: str = "", stream: str = "", topic: str = "",
         status += "; also searchable: " + ", ".join(f"stream={s}" for s in allowlisted)
     header = f"Search as {zulip_core.get_client().email} ({status})"
     # combine=False: adjacent hits can come from different conversations.
-    body = zulip_core.format_messages(messages, include_topic=True, combine=False)
+    body = zulip_core.format_messages(messages, include_topic=True, combine=False,
+                                      max_chars=max_chars)
     return header + ("\n\n" + body if body else "")
 
 
@@ -1422,7 +1427,7 @@ def resolve_name(query: str) -> str:
 
 @mcp.tool()
 def get_subscribed_streams() -> str:
-    """Get streams the bot is subscribed to."""
+    """Get streams this account is subscribed to."""
     subs = zulip_core.get_subscribed_streams()
     if not subs:
         return "Not subscribed to any streams."

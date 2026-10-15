@@ -659,7 +659,7 @@ def _is_human_account() -> bool:
 
 
 def format_messages(messages: list[dict], include_topic: bool = False,
-                    combine: bool = True) -> str:
+                    combine: bool = True, max_chars: Optional[int] = None) -> str:
     """Format messages as XML <msg> tags.
 
     combine=True merges consecutive messages from same user within 2 min.
@@ -668,6 +668,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     a dm attribute listing participant emails for DMs.
     Messages carrying ``flags`` get mentioned="true" when they mention this
     account, and unread="true" when unread by a human account.
+    max_chars clips each message's content to that many characters, marking
+    the cut with the full length.
 
     Note: Messages in /nobots or /nb topics or starting with /nobots or /nb are automatically
     filtered out and will not be shown to the bot.
@@ -679,6 +681,10 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     messages = filter_for_bot(messages)
     if not messages:
         return ""
+
+    # Clip before combining so each marker names its own message.
+    if max_chars is not None:
+        messages = [_clip_content(m, max_chars) for m in messages]
 
     if combine:
         messages = _combine_messages(messages)
@@ -734,6 +740,15 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     return "\n".join(lines)
 
 
+def _clip_content(msg: dict, max_chars: int) -> dict:
+    """Return msg with content cut to max_chars plus a marker naming the full length."""
+    content = msg.get("content", "")
+    if len(content) <= max_chars:
+        return msg
+    marker = f"… [{len(content)} chars; get_message_by_id({msg.get('id', '')}) returns the rest]"
+    return {**msg, "content": content[:max_chars] + marker}
+
+
 def _merge_flags(current: dict, msg: dict) -> None:
     """Fold msg's flags into current: read only if both are read, other flags unioned."""
     if "flags" not in msg:
@@ -785,7 +800,7 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
 # ============================================================================
 
 def get_profile() -> dict:
-    """Get the bot's own profile. Returns the profile dict from the API."""
+    """Get this account's own profile. Returns the profile dict from the API."""
     return get_client().get_profile()
 
 
@@ -1460,7 +1475,7 @@ def get_message_link(message_id: int) -> str:
 
 
 def get_subscribed_streams() -> list[dict]:
-    """Get streams the bot is subscribed to. Returns list of subscription dicts."""
+    """Get streams this account is subscribed to. Returns list of subscription dicts."""
     result = get_client().get_subscriptions()
     if result["result"] != "success":
         return []
