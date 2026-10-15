@@ -16,6 +16,7 @@ search_messages = getattr(mcp.search_messages, "fn", mcp.search_messages)
 BOT = "bot@example.com"
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
+ME = 100
 PUBLIC = [{"operator": "channels", "operand": "public"}]
 
 
@@ -56,6 +57,9 @@ class FakeClient:
         ]
         self.requests: list[dict] = []
         self.response: Optional[dict] = None
+
+    def get_profile(self) -> dict:
+        return {"result": "success", "is_bot": False, "user_id": ME}
 
     def get_messages(self, request: dict) -> dict:
         if request.get("num_before") == 0 and isinstance(request.get("anchor"), int):
@@ -919,6 +923,25 @@ def test_search_header_and_output(dm_reads: FakeClient) -> None:
     assert 'stream="general"' in out and 'topic="t"' in out
     assert f'dm="{ALICE}, {BOT}"' in out
     assert "deploy secret" not in out
+
+
+def test_search_tags_unread_and_mentioned(dm_reads: FakeClient) -> None:
+    dm_reads.messages = [
+        {**stream_msg(1, 100), "flags": ["mentioned"]},
+        {**stream_msg(2, 105), "flags": ["read"]},
+        {**dm_msg(3, [ALICE, BOT], timestamp=110), "flags": [], "sender_id": ME},
+        {**dm_msg(4, [ALICE, BOT], timestamp=115), "flags": ["read", "wildcard_mentioned"]},
+    ]
+
+    tags = [line for line in search_messages(query="x").splitlines() if line.startswith("<msg ")]
+
+    assert tags == [
+        '<msg user="Alice" time="1970-01-01 00:01:40 UTC" stream="general" visibility="public" '
+        'topic="t" id="1" unread="true" mentioned="true">',
+        '<msg user="Alice" stream="general" visibility="public" topic="t" id="2">',
+        f'<msg user="Alice" dm="{ALICE}, {BOT}" id="3">',
+        f'<msg user="Alice" dm="{ALICE}, {BOT}" id="4" mentioned="true">',
+    ]
 
 
 def test_search_header_reports_after_bound(client: FakeClient) -> None:

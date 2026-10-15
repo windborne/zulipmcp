@@ -637,25 +637,28 @@ _MENTION_FLAGS = frozenset({
     "group_mentioned", "wildcard_mentioned",
 })
 
-_account_is_human: Optional[bool] = None
+_account: Optional[tuple[zulip.Client, bool, Optional[int]]] = None
 
 
-def _is_human_account() -> bool:
-    """Whether this client is a human account, from a profile GET cached once it succeeds.
+def _human_user_id() -> Optional[int]:
+    """This account's user_id if it is a human account, else None.
 
-    A failed lookup answers False uncached, so one transient error can't
-    suppress unread markers for the rest of the process.
+    The profile GET is cached per client once it succeeds; a failed lookup
+    answers None uncached, so one transient error can't suppress unread
+    markers for the rest of the process.
     """
-    global _account_is_human
-    if _account_is_human is None:
+    global _account
+    client = get_client()
+    if _account is None or _account[0] is not client:
         try:
-            profile = get_profile()
+            profile = client.get_profile()
         except Exception:
-            return False
+            return None
         if profile.get("result") != "success":
-            return False
-        _account_is_human = profile.get("is_bot") is False
-    return _account_is_human
+            return None
+        _account = (client, profile.get("is_bot") is False, profile.get("user_id"))
+    _, is_human, user_id = _account
+    return user_id if is_human else None
 
 
 def format_messages(messages: list[dict], include_topic: bool = False,
@@ -667,7 +670,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     include_topic=True adds stream and topic attributes to each <msg> tag, or
     a dm attribute listing participant emails for DMs.
     Messages carrying ``flags`` get mentioned="true" when they mention this
-    account, and unread="true" when unread by a human account.
+    account, and unread="true" when a human account hasn't read them; its own
+    messages are never unread.
     max_chars clips each message's content to that many characters, marking
     the cut with the full length.
 
@@ -686,12 +690,16 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     if max_chars is not None:
         messages = [_clip_content(m, max_chars) for m in messages]
 
+    # Bots never mark messages read, so unread is only meaningful for humans;
+    # skip the profile lookup when nothing could be unread.
+    me = (_human_user_id()
+          if any("read" not in m.get("flags", ["read"]) for m in messages) else None)
+
     if combine:
         messages = _combine_messages(messages)
 
     lines = []
     prev_timestamp = None
-    human: Optional[bool] = None  # resolved at most once per call, only if needed
     for msg in messages:
         sender = msg.get("sender_full_name", "Unknown")
         msg_id = msg.get("id", "")
@@ -715,17 +723,13 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'dm="{emails}"')
         attrs.append(f'id="{msg_id}"')
 
-        # Bots never mark messages read, so unread would tag nearly everything
-        # for them. Event-sourced messages carry no flags: unknown, not unread.
-        flags = msg.get("flags")
-        if flags is not None:
-            if "read" not in flags:
-                if human is None:
-                    human = _is_human_account()
-                if human:
-                    attrs.append('unread="true"')
-            if _MENTION_FLAGS.intersection(flags):
-                attrs.append('mentioned="true"')
+        # Missing flags mean unknown, not unread. Messages sent through the
+        # API start unread for their own sender, so those never count.
+        flags = msg.get("flags", ["read"])
+        if "read" not in flags and me is not None and msg.get("sender_id") != me:
+            attrs.append('unread="true"')
+        if _MENTION_FLAGS.intersection(flags):
+            attrs.append('mentioned="true"')
 
         # Add reaction summary as attribute if present
         reaction_str = summarize_reactions(msg.get("reactions", []))
@@ -749,25 +753,8 @@ def _clip_content(msg: dict, max_chars: int) -> dict:
     return {**msg, "content": content[:max_chars] + marker}
 
 
-def _merge_flags(current: dict, msg: dict) -> None:
-    """Fold msg's flags into current: read only if both are read, other flags unioned."""
-    if "flags" not in msg:
-        return
-    if "flags" not in current:
-        current["flags"] = list(msg["flags"])
-        return
-    both_read = "read" in current["flags"] and "read" in msg["flags"]
-    merged = dict.fromkeys([*current["flags"], *msg["flags"]])
-    if not both_read:
-        merged.pop("read", None)
-    current["flags"] = list(merged)
-
-
 def _combine_messages(messages: list[dict]) -> list[dict]:
-    """Merge consecutive messages from same user within 2 minutes.
-
-    A merged block is unread if any part is, and mentioned if any part is.
-    """
+    """Merge consecutive messages from same user within 2 minutes."""
     if not messages:
         return []
 
@@ -785,7 +772,12 @@ def _combine_messages(messages: list[dict]) -> list[dict]:
             current["time_range_end"] = msg.get("timestamp", 0)
             current["id"] = msg.get("id", current["id"])
             current["reactions"].extend(msg.get("reactions", []))
-            _merge_flags(current, msg)
+            if "flags" in msg:
+                prev = current.get("flags", msg["flags"])
+                merged = {*prev, *msg["flags"]}
+                if "read" not in prev or "read" not in msg["flags"]:
+                    merged.discard("read")
+                current["flags"] = sorted(merged)
         else:
             combined.append(current)
             current = dict(msg)
@@ -1727,7 +1719,11 @@ def get_events(queue_id: str, last_event_id: int,
     for ev in events:
         new_last = max(new_last, ev.get("id", new_last))
         if ev.get("type") == "message":
-            messages.append(ev["message"])
+            # Message events carry flags beside the message, not inside it.
+            if "flags" in ev:
+                messages.append({**ev["message"], "flags": ev["flags"]})
+            else:
+                messages.append(ev["message"])
         elif ev.get("type") == "reaction":
             reactions.append(ev)
     return messages, reactions, new_last

@@ -9,11 +9,11 @@ from zulipmcp import core
 _MISSING = object()
 
 
-def msg(msg_id: int, flags: Any = _MISSING, timestamp: int = 1000) -> dict:
+def msg(msg_id: int, flags: Any = _MISSING, timestamp: int = 1000, sender_id: int = 5) -> dict:
     m: dict = {
         "id": msg_id, "timestamp": timestamp, "type": "stream",
         "display_recipient": "general", "subject": "t", "content": "hi",
-        "sender_full_name": "Alice",
+        "sender_full_name": "Alice", "sender_id": sender_id,
     }
     if flags is not _MISSING:
         m["flags"] = flags
@@ -22,20 +22,21 @@ def msg(msg_id: int, flags: Any = _MISSING, timestamp: int = 1000) -> dict:
 
 @pytest.fixture
 def profile(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], list[int]]:
-    """Install a fake get_profile returning (or raising) ``result``; returns the call log."""
-    monkeypatch.setattr(core, "_account_is_human", None)
+    """Install a client whose get_profile returns (or raises) ``result``; returns the call log."""
     monkeypatch.setattr(core, "TIMEZONE", ZoneInfo("UTC"))
 
     def install(result: Any) -> list[int]:
         calls: list[int] = []
 
-        def fake() -> dict:
-            calls.append(1)
-            if isinstance(result, BaseException):
-                raise result
-            return result
+        class FakeClient:
+            def get_profile(self) -> dict:
+                calls.append(1)
+                if isinstance(result, BaseException):
+                    raise result
+                return result
 
-        monkeypatch.setattr(core, "get_profile", fake)
+        fake = FakeClient()
+        monkeypatch.setattr(core, "get_client", lambda: fake)
         return calls
 
     return install
@@ -47,12 +48,6 @@ BOT = {"result": "success", "is_bot": True, "user_id": 2}
 
 def tag(out: str) -> str:
     return out.splitlines()[0]
-
-
-def test_human_unread(profile: Callable) -> None:
-    profile(HUMAN)
-
-    assert 'unread="true"' in core.format_messages([msg(1, [])])
 
 
 def test_human_read(profile: Callable) -> None:
@@ -103,12 +98,13 @@ def test_marker_order(profile: Callable) -> None:
     )
 
 
-def test_profile_fetched_once(profile: Callable) -> None:
-    calls = profile(HUMAN)
-    core.format_messages([msg(1, [])])
-    core.format_messages([msg(2, [])])
+def test_own_messages_never_unread(profile: Callable) -> None:
+    profile(HUMAN)
+    out = core.format_messages([msg(1, [], sender_id=HUMAN["user_id"]), msg(2, [], timestamp=5000)])
+    own, other = (line for line in out.splitlines() if line.startswith("<msg "))
 
-    assert calls == [1]
+    assert "unread=" not in own
+    assert 'unread="true"' in other
 
 
 @pytest.mark.parametrize("result, retried", [
@@ -161,19 +157,19 @@ def test_combined_block_mentioned_if_any_part_mentioned(
     assert "unread=" not in out
 
 
-def test_combine_leaves_inputs_untouched(profile: Callable) -> None:
+def test_event_messages_carry_their_flags(profile: Callable, monkeypatch: pytest.MonkeyPatch) -> None:
     profile(HUMAN)
-    first, second = msg(1, ["read"]), msg(2, [], timestamp=1060)
-    core.format_messages([first, second])
+    first, second = msg(1), msg(2, timestamp=5000)
+    events = [
+        {"id": 4, "type": "message", "message": first, "flags": ["mentioned"]},
+        {"id": 5, "type": "message", "message": second},
+    ]
+    monkeypatch.setattr(core.get_client(), "call_endpoint",
+                        lambda **_: {"result": "success", "events": events}, raising=False)
 
-    assert first["flags"] == ["read"]
-    assert second["flags"] == []
+    messages, _, last_event_id = core.get_events("queue", 3)
 
-
-def test_uncombined_messages_keep_own_markers(profile: Callable) -> None:
-    profile(HUMAN)
-    out = core.format_messages([msg(1, ["read"]), msg(2, [], timestamp=1060)], combine=False)
-    first, second = (line for line in out.splitlines() if line.startswith("<msg "))
-
-    assert "unread=" not in first
-    assert 'unread="true"' in second
+    assert [m.get("flags") for m in messages] == [["mentioned"], None]
+    assert last_event_id == 5
+    assert "flags" not in first
+    assert 'id="1" unread="true" mentioned="true">' in core.format_messages(messages)

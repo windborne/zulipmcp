@@ -196,7 +196,6 @@ def test_read_only_unread_marker_fetches_profile_with_get(
     transport: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ZULIPMCP_READ_ONLY", "1")
-    monkeypatch.setattr(core, "_account_is_human", None)
     msg = {"id": 1, "timestamp": 0, "type": "stream", "content": "hi", "flags": []}
 
     assert 'unread="true"' in core.format_messages([msg])
