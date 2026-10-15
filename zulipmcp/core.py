@@ -661,6 +661,17 @@ def _human_user_id() -> Optional[int]:
     return user_id if is_human else None
 
 
+# Message text and names are attacker-controlled: an unescaped quote in a
+# name adds attributes, and "<msg"/"</msg" in a body forges whole messages.
+_MSG_TAG_RE = re.compile(r"<(?=\s*/?\s*msg\b)", re.IGNORECASE)
+_ATTR_ESCAPES = str.maketrans({'"': "&quot;", "<": "&lt;", ">": "&gt;"})
+
+
+def _attr(value: Any) -> str:
+    """Escape a value for a double-quoted <msg> attribute."""
+    return str(value).translate(_ATTR_ESCAPES)
+
+
 def format_messages(messages: list[dict], include_topic: bool = False,
                     combine: bool = True, max_chars: Optional[int] = None) -> str:
     """Format messages as XML <msg> tags.
@@ -709,19 +720,19 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         # Build the time attribute
         time_attr = _time_attr(msg, prev_timestamp)
 
-        attrs = [f'user="{sender}"']
+        attrs = [f'user="{_attr(sender)}"']
         if time_attr:
             attrs.append(time_attr)
         if include_topic and msg.get("type") == "stream":
             stream_name = msg.get("display_recipient", "")
             visibility = "private" if is_stream_private(stream_name) else "public"
-            attrs.append(f'stream="{stream_name}"')
+            attrs.append(f'stream="{_attr(stream_name)}"')
             attrs.append(f'visibility="{visibility}"')
-            attrs.append(f'topic="{msg.get("subject", "")}"')
+            attrs.append(f'topic="{_attr(msg.get("subject", ""))}"')
         elif include_topic and msg.get("type") == "private":
             emails = ", ".join(r.get("email", "") for r in msg.get("display_recipient", []))
-            attrs.append(f'dm="{emails}"')
-        attrs.append(f'id="{msg_id}"')
+            attrs.append(f'dm="{_attr(emails)}"')
+        attrs.append(f'id="{_attr(msg_id)}"')
 
         # Missing flags mean unknown, not unread. Messages sent through the
         # API start unread for their own sender, so those never count.
@@ -734,10 +745,10 @@ def format_messages(messages: list[dict], include_topic: bool = False,
         # Add reaction summary as attribute if present
         reaction_str = summarize_reactions(msg.get("reactions", []))
         if reaction_str:
-            attrs.append(f'reactions="{reaction_str}"')
+            attrs.append(f'reactions="{_attr(reaction_str)}"')
 
         tag_open = "<msg " + " ".join(attrs) + ">"
-        lines.append(f"{tag_open}\n{content}\n</msg>")
+        lines.append(f"{tag_open}\n{_MSG_TAG_RE.sub('&lt;', content)}\n</msg>")
 
         prev_timestamp = msg.get("time_range_end", timestamp)
 
