@@ -48,7 +48,6 @@ def bootstrap_prompt(
     listen_timeout_hours: float | None = None,
 ) -> str:
     """Return the initial instruction given to a newly spawned agent."""
-    # Exact names: these are tool arguments, not display text.
     prompt = (
         f"Call set_context({stream!r}, {topic!r}) to begin, "
         f"then handle the request and listen for follow-ups."

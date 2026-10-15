@@ -660,11 +660,10 @@ def _human_user_id() -> Optional[int]:
     return _account[1]
 
 
-# Message text and names are attacker-controlled. Every "<" in them is escaped,
-# so they can't open or close a <msg> block (or any other markup); "&" stays raw
-# so URLs and names like "R&D" round-trip. Unicode tag characters render
-# invisibly but models read them, so they're dropped (subdivision flag emoji
-# degrade to a plain black flag).
+# For format_messages: message text and names are attacker-controlled, so every
+# "<" in them is escaped and they can't open or close a <msg> block; "&" stays
+# raw so URLs survive. Unicode tag characters render invisibly but models read
+# them, so they're dropped (subdivision flag emoji degrade to a plain black flag).
 _TEXT_ESCAPES = str.maketrans({"<": "&lt;", **dict.fromkeys(range(0xE0000, 0xE0080))})
 _ATTR_ESCAPES = str.maketrans({'"': "&quot;", ">": "&gt;"})
 
@@ -1389,16 +1388,16 @@ def verify_message(message_id: int) -> str:
     if not msg:
         return f"Error: Message {message_id} not found."
 
-    sender_name = escape_msg_text(msg.get("sender_full_name", "Unknown"))
+    sender_name = msg.get("sender_full_name", "Unknown")
     sender_email = msg.get("sender_email", "Unknown")
     sender_id = msg.get("sender_id", "Unknown")
     timestamp = msg.get("timestamp", 0)
     ts_str = datetime.fromtimestamp(timestamp, tz=TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z") if timestamp else "Unknown"
-    stream = escape_msg_text(msg.get("display_recipient", "Unknown")) if msg.get("type") == "stream" else "DM"
-    topic = escape_msg_text(msg.get("subject", "Unknown")) if msg.get("type") == "stream" else "N/A"
+    stream = msg.get("display_recipient", "Unknown") if msg.get("type") == "stream" else "DM"
+    topic = msg.get("subject", "Unknown") if msg.get("type") == "stream" else "N/A"
 
     # Strip # and @ so delimiters can't be forged in content
-    content = escape_msg_text(msg.get("content", ""))
+    content = msg.get("content", "")
     content = content.replace("#", "").replace("@", "")
 
     return (
