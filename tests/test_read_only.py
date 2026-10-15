@@ -56,6 +56,13 @@ WRITE_TOOLS = {
     "upload_file",
 }
 
+
+@pytest.fixture(autouse=True)
+def no_log_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_server() would set up a real log file; tests/test_logging.py covers it."""
+    monkeypatch.setattr(mcp, "_setup_logging", lambda: None)
+
+
 # Canned bodies for the GETs the write paths make before their write.
 _GET_ROUTES: dict[str, dict[str, Any]] = {
     "server_settings": {"zulip_version": "12.0", "zulip_feature_level": 500},

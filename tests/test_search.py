@@ -1187,12 +1187,15 @@ def test_search_rejects_invalid_max_chars(client: FakeClient, max_chars: int) ->
     assert client.requests == []
 
 
-def test_format_messages_clips_parts_before_combining(client: FakeClient) -> None:
+def test_format_messages_does_not_combine_when_clipping(client: FakeClient) -> None:
     msgs = [stream_msg(1, content="first part"), stream_msg(2, timestamp=1060, content="second")]
+
+    assert core.format_messages(msgs).count("<msg ") == 1
     out = core.format_messages(msgs, max_chars=5)
 
-    assert out.count("<msg ") == 1
-    assert f"{clipped('first', 10)}\n\n{clipped('secon', 6)}\n</msg>" in out
+    assert out.count("<msg ") == 2
+    assert f"\n{clipped('first', 10)}\n</msg>" in out
+    assert f"\n{clipped('secon', 6)}\n</msg>" in out
 
 
 def test_format_messages_hides_nobots_before_clipping(client: FakeClient) -> None:

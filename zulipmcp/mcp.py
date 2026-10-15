@@ -25,28 +25,35 @@ from typing import Literal, Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
-
-# ============================================================================
-# Logging setup — file-based for debugging MCP connection issues
-# ============================================================================
-
-_log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
-_log_dir.mkdir(parents=True, exist_ok=True)
-_log_file = _log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-_logger = logging.getLogger("zulipmcp")
-_logger.setLevel(logging.DEBUG)
-_file_handler = logging.FileHandler(_log_file)
-_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-_logger.addHandler(_file_handler)
-_logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={_log_file}")
 from fastmcp.server.context import Context
 
 from . import core as zulip_core
+
+_logger = logging.getLogger("zulipmcp")
+_logging_ready = False
+
+
+def _setup_logging() -> None:
+    """Log zulipmcp at DEBUG to a per-process file and, via root, to stderr;
+    other loggers' warnings go to stderr.
+
+    Runs from run_server() only, never at import: a library must not configure
+    the importing program's root logger or leave files behind.
+    """
+    global _logging_ready
+    if _logging_ready:
+        return
+    log_dir = Path(os.environ.get("ZULIPMCP_LOG_DIR", "/tmp/zulipmcp_logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"mcp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+    _logger.setLevel(logging.DEBUG)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _logger.addHandler(file_handler)
+    _logging_ready = True
+    _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={log_file}")
+
 
 mcp = FastMCP("Zulip Messaging")
 
@@ -765,7 +772,7 @@ def end_session(message: str = _DEFAULT_FAREWELL) -> str:
 
     _session.reset()
     _logger.info("end_session() completed")
-    return f"Session ended. Was chatting in #{stream} > {topic}"
+    return zulip_core.escape_msg_tags(f"Session ended. Was chatting in #{stream} > {topic}")
 
 
 # Backwards-compatible alias
@@ -813,13 +820,13 @@ def list_streams(fields: list[str] | None = None) -> str:
         visibility = "[private]" if s.get("invite_only", False) else "[public]"
         line = f"- {visibility} #{s['name']}"
         if s.get("description"):
-            line += f": {zulip_core.escape_msg_tags(s['description'])}"
+            line += f": {s['description']}"
         if fields:
             line += " | " + " ".join(
                 _format_stream_field(f, s.get(f)) for f in fields
             )
         lines.append(line)
-    return f"Found {len(streams)} streams:\n\n" + "\n".join(lines)
+    return zulip_core.escape_msg_tags(f"Found {len(streams)} streams:\n\n" + "\n".join(lines))
 
 
 @mcp.tool()
@@ -841,8 +848,8 @@ def get_stream_topics(stream: str, limit: int = 20) -> str:
         return f"No topics found in #{stream}."
     lines = [f"Recent topics in #{stream}:"]
     for t in topics:
-        lines.append(zulip_core.escape_msg_tags(f"- {t.get('name', 'Unknown')}"))
-    return "\n".join(lines)
+        lines.append(f"- {t.get('name', 'Unknown')}")
+    return zulip_core.escape_msg_tags("\n".join(lines))
 
 
 @mcp.tool()
@@ -864,7 +871,7 @@ def get_stream_members(stream: str) -> str:
     lines = [f"#{stream} has {len(members)} member(s):"]
     for u in members:
         lines.append(f"- {u['full_name']} ({u['email']})")
-    return "\n".join(lines)
+    return zulip_core.escape_msg_tags("\n".join(lines))
 
 
 def _parse_when(value: str) -> Optional[datetime]:
@@ -893,7 +900,7 @@ def _dm_label(emails: list[str]) -> str:
     """DM participants other than self, or just self for a self-DM."""
     me = (zulip_core.get_client().email or "").lower()
     others = [e for e in emails if e.lower() != me]
-    return "DM with " + ", ".join(others or emails)
+    return zulip_core.escape_msg_tags("DM with " + ", ".join(others or emails))
 
 
 @mcp.tool()
@@ -1072,7 +1079,7 @@ def get_message_link(message_id: int) -> str:
     """
     if zulip_core.get_message_by_id(message_id) is None:
         return f"Message {message_id} not found or not accessible."
-    return zulip_core.get_message_link(message_id)
+    return zulip_core.escape_msg_tags(zulip_core.get_message_link(message_id))
 
 
 # ============================================================================
@@ -1391,7 +1398,7 @@ def get_user_info(email: str) -> str:
                 name = field_names.get(field_id, f"Field {field_id}")
                 lines.append(f"{name}: {value}")
 
-    return "\n".join(lines)
+    return zulip_core.escape_msg_tags("\n".join(lines))
 
 
 @mcp.tool()
@@ -1412,7 +1419,7 @@ def resolve_name(query: str) -> str:
         lines.append(f"- {u['full_name']} ({u['email']})")
     if len(matches) == 1:
         lines.append(f"\nTo mention them: @**{matches[0]['full_name']}**")
-    return "\n".join(lines)
+    return zulip_core.escape_msg_tags("\n".join(lines))
 
 
 @mcp.tool()
@@ -1425,7 +1432,7 @@ def get_subscribed_streams() -> str:
     for s in subs:
         visibility = "[private]" if zulip_core.is_stream_private(s["name"]) else "[public]"
         lines.append(f"- {visibility} #{s['name']}")
-    return "\n".join(lines)
+    return zulip_core.escape_msg_tags("\n".join(lines))
 
 
 # ============================================================================
@@ -1499,6 +1506,7 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     With ``ZULIPMCP_READ_ONLY`` on, write tools are hidden and session
     auto-init is skipped (the session tools don't exist in that mode).
     """
+    _setup_logging()
     read_only = zulip_core.is_read_only()
     if read_only:
         _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")

@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import tempfile
+import unicodedata
 import json
 import math
 import urllib.parse
@@ -662,22 +663,54 @@ def _human_user_id() -> Optional[int]:
 
 # Message text and names are attacker-controlled: an unescaped quote in a
 # name adds attributes, and "<msg"/"</msg" in a body forges whole messages.
-# Only tag-shaped text is touched (msg then ">" or an attribute), so code like
-# "i < msg.length" survives.
-_INVISIBLE = (r"[\s\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069"
-              r"\u3164\ufe00-\ufe0f\ufeff]*")  # whitespace, zero-width and bidi format chars
-_MSG_TAG_RE = re.compile(
-    rf"<(?={_INVISIBLE}/?{_INVISIBLE}m{_INVISIBLE}s{_INVISIBLE}g{_INVISIBLE}(?:/?>|[\w-]+{_INVISIBLE}=))",
-    re.IGNORECASE)
+# Only tag-shaped text is touched, so code like "i < msg.length" survives.
+# Readers look past characters that render as nothing, so the match does too;
+# judged by Unicode category because any list misses some.
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Mn", "Me", "Zs", "Zl", "Zp"})
+_BLANKS = frozenset("\u115f\u1160\u3164\uffa0\u2800")  # Hangul fillers, braille blank
 # Unicode tag characters render invisibly but models read them as text. Their
 # only legitimate use, subdivision flag emoji, degrades to a plain black flag.
 _STRIP_TAG_CHARS = dict.fromkeys(range(0xE0000, 0xE0080))
 _ATTR_ESCAPES = str.maketrans({'"': "&quot;", "<": "&lt;", ">": "&gt;", **_STRIP_TAG_CHARS})
 
 
+def _is_invisible(c: str) -> bool:
+    return c.isspace() or unicodedata.category(c) in _INVISIBLE_CATEGORIES or c in _BLANKS
+
+
+def _skip_invisible(text: str, i: int) -> int:
+    while i < len(text) and _is_invisible(text[i]):
+        i += 1
+    return i
+
+
+def _opens_msg_tag(text: str, i: int) -> bool:
+    """Whether the "<" at text[i] reads as <msg or </msg: "msg" (any case,
+    invisibles anywhere), then a ">" or "=" before the next "<"."""
+    i = _skip_invisible(text, i + 1)
+    if text.startswith("/", i):
+        i = _skip_invisible(text, i + 1)
+    for letter in "msg":
+        if i == len(text) or text[i].casefold() != letter:
+            return False
+        i = _skip_invisible(text, i + 1)
+    if i == len(text) or (not _is_invisible(text[i - 1]) and (text[i].isalnum() or text[i] == "_")):
+        return False  # <msgs>, <msg_id>
+    # Any ">" or "=" before the next "<" makes it a tag (<msg . user=...>, or
+    # attributes split across lines or joined messages). Code like
+    # "i < msg.length" is left alone unless one follows; a false positive only
+    # shows a "<" as "&lt;".
+    while i < len(text) and text[i] != "<":
+        if text[i] in ">=":
+            return True
+        i += 1
+    return False
+
+
 def escape_msg_tags(text: str) -> str:
     """Neutralize anything in text that reads as a <msg> or </msg> tag; drop tag characters."""
-    return _MSG_TAG_RE.sub("&lt;", text.translate(_STRIP_TAG_CHARS))
+    text = text.translate(_STRIP_TAG_CHARS)
+    return re.sub("<", lambda m: "&lt;" if _opens_msg_tag(text, m.start()) else "<", text)
 
 
 def _attr(value: Any) -> str:
@@ -696,8 +729,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     Messages carrying ``flags`` get mentioned="true" when they mention this
     account, and unread="true" when a human account hasn't read them, except
     on the account's own messages.
-    max_chars clips each message's content to that many characters, marking
-    the cut with the full length.
+    max_chars clips each message's content to that many displayed (escaped)
+    characters, marking the cut with the full length, and turns combining off.
 
     Note: Messages in /nobots or /nb topics or starting with /nobots or /nb are automatically
     filtered out and will not be shown to the bot.
@@ -710,15 +743,14 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     if not messages:
         return ""
 
-    # Clip before combining so each marker counts its own message.
-    if max_chars is not None:
-        messages = [_clip_content(m, max_chars) for m in messages]
-
     # Look up the account only if something could be unread.
     me = (_human_user_id()
           if any("read" not in m.get("flags", ["read"]) for m in messages) else None)
 
-    if combine:
+    if max_chars is not None:
+        messages = [_clip_content(m, max_chars) for m in messages]
+    # Not when clipping: joining two clipped stubs could rebuild a tag across the seam.
+    elif combine:
         messages = _combine_messages(messages)
 
     lines = []
@@ -769,7 +801,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
 
 def _clip_content(msg: dict, max_chars: int) -> dict:
     """Return msg with content cut to max_chars plus a marker naming the full length."""
-    content = msg.get("content", "")
+    # Escape before cutting: a tag cut short of its ">" isn't tag-shaped anymore.
+    content = escape_msg_tags(msg.get("content", ""))
     if len(content) <= max_chars:
         return msg
     marker = f"… [{len(content)} chars; get_message_by_id has the rest]"
@@ -1396,16 +1429,16 @@ def verify_message(message_id: int) -> str:
     if not msg:
         return f"Error: Message {message_id} not found."
 
-    sender_name = msg.get("sender_full_name", "Unknown")
+    sender_name = escape_msg_tags(msg.get("sender_full_name", "Unknown"))
     sender_email = msg.get("sender_email", "Unknown")
     sender_id = msg.get("sender_id", "Unknown")
     timestamp = msg.get("timestamp", 0)
     ts_str = datetime.fromtimestamp(timestamp, tz=TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z") if timestamp else "Unknown"
-    stream = msg.get("display_recipient", "Unknown") if msg.get("type") == "stream" else "DM"
-    topic = msg.get("subject", "Unknown") if msg.get("type") == "stream" else "N/A"
+    stream = escape_msg_tags(msg.get("display_recipient", "Unknown")) if msg.get("type") == "stream" else "DM"
+    topic = escape_msg_tags(msg.get("subject", "Unknown")) if msg.get("type") == "stream" else "N/A"
 
     # Strip # and @ so delimiters can't be forged in content
-    content = msg.get("content", "")
+    content = escape_msg_tags(msg.get("content", ""))
     content = content.replace("#", "").replace("@", "")
 
     return (
