@@ -643,9 +643,8 @@ _account: Optional[tuple[zulip.Client, Optional[int]]] = None  # (client, user_i
 def _human_user_id() -> Optional[int]:
     """This account's user_id if it is a human account, else None.
 
-    The profile GET is cached per client once it succeeds; a failed lookup
-    (no config, network, API error) answers None uncached, so one transient
-    error can't suppress unread markers for the rest of the process.
+    Cached per client only on success, so a transient failure (no config,
+    network, API error) can't suppress unread markers for the whole process.
     """
     global _account
     try:
@@ -711,8 +710,7 @@ def format_messages(messages: list[dict], include_topic: bool = False,
     if max_chars is not None:
         messages = [_clip_content(m, max_chars) for m in messages]
 
-    # Bots never mark messages read, so unread is only meaningful for humans;
-    # skip the profile lookup when nothing could be unread.
+    # Look up the account only if something could be unread.
     me = (_human_user_id()
           if any("read" not in m.get("flags", ["read"]) for m in messages) else None)
 
@@ -744,8 +742,8 @@ def format_messages(messages: list[dict], include_topic: bool = False,
             attrs.append(f'dm="{_attr(emails)}"')
         attrs.append(f'id="{_attr(msg_id)}"')
 
-        # Missing flags mean unknown, not unread. Messages sent through the
-        # API start unread for their own sender, so those never count.
+        # Missing flags mean unknown, not unread. API-sent messages start
+        # unread for their own sender, so those never count.
         flags = msg.get("flags", ["read"])
         if "read" not in flags and me is not None and msg.get("sender_id") != me:
             attrs.append('unread="true"')
