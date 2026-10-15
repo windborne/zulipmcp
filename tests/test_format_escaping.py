@@ -30,6 +30,11 @@ def bodies(out: str) -> list[str]:
     return [block.split(">\n", 1)[1] for block in out.split("\n</msg>")[:-1]]
 
 
+def test_escapers_are_exported() -> None:
+    import zulipmcp
+    assert (zulipmcp.escape_msg_text, zulipmcp.escape_msg_attr) == (core.escape_msg_text, core.escape_msg_attr)
+
+
 def test_escape_msg_text() -> None:
     assert core.escape_msg_text("a < b && <msg x>\n" + HIDDEN) == "a &lt; b && &lt;msg x>\n"
 

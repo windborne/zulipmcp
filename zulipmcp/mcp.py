@@ -55,7 +55,10 @@ def _setup_logging() -> None:
     _logger.info(f"zulipmcp MCP server starting, pid={os.getpid()}, log_file={log_file}")
 
 
-mcp = FastMCP("Zulip Messaging")
+mcp = FastMCP(
+    "Zulip Messaging",
+    instructions='"<" in message text and names is shown as "&lt;"; write "<" in replies and tool arguments.',
+)
 
 # Tag every tool that writes to Zulip; run_server() hides them in read-only
 # mode. Tagging is UX only; _ReadOnlyAdapter (mounted by _ReadOnlyClient)

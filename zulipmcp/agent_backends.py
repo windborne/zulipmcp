@@ -9,8 +9,6 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from .core import escape_msg_text
-
 
 class LaunchConfig(Protocol):
     """Subset of listener.Config needed to build backend commands."""
@@ -50,7 +48,8 @@ def bootstrap_prompt(
     listen_timeout_hours: float | None = None,
 ) -> str:
     """Return the initial instruction given to a newly spawned agent."""
-    prompt = escape_msg_text(
+    # Exact names: these are tool arguments, not display text.
+    prompt = (
         f"Call set_context({stream!r}, {topic!r}) to begin, "
         f"then handle the request and listen for follow-ups."
     )
