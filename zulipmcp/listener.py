@@ -72,6 +72,39 @@ def _slug(text: str) -> str:
     return slug[:100]
 
 
+def _session_error(log_path: Path) -> str | None:
+    """Return the error text if the session's final result was an API/auth error."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            if ev.get("is_error") and ev.get("terminal_reason") == "api_error":
+                return str(ev.get("result") or "unknown API error")
+            return None
+    return None
+
+
+def _alert(cfg: Config, stream: str, topic: str, error: str, log_path: Path) -> None:
+    """Tell the topic the session died, since the agent itself couldn't."""
+    try:
+        zulip.Client(config_file=str(cfg.zuliprc)).send_message({
+            "type": "stream", "to": stream, "topic": topic,
+            "content": f":warning: Agent session failed before it could reply: `{error}` "
+                       f"(log: `{log_path}`)",
+        })
+    except Exception as exc:
+        print(f"[listener] Failed to post session-failure alert: {exc}", file=sys.stderr)
+
+
 def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
     """Launch an agent session for this message, if not already running."""
     stream, topic = msg["display_recipient"], msg["subject"]
@@ -114,6 +147,9 @@ def _spawn(cfg: Config, msg: dict[str, Any]) -> None:
     def reap():
         proc.wait()
         fh.close()
+        error = _session_error(log_path)
+        if error:
+            _alert(cfg, stream, topic, error, log_path)
         with _lock:
             _sessions.pop(key, None)
 
