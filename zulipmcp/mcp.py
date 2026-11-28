@@ -1203,6 +1203,34 @@ def remove_reaction(message_id: int, emoji_name: str,
 
 
 @mcp.tool(tags={WRITE_TAG})
+def update_message_flags(message_ids: list[int],
+                         flag: Literal["starred", "read", "collapsed"],
+                         op: Literal["add", "remove"]) -> str:
+    """Add or remove a personal flag on messages (star/unstar, mark read/unread).
+
+    Flags are per-user: they change only this account's own view of the messages.
+
+    Args:
+        message_ids: IDs of the messages to update.
+        flag: "starred", "read", or "collapsed".
+        op: "add" to set the flag, "remove" to clear it.
+    """
+    if not message_ids:
+        return "Error: Provide at least one message ID."
+    result = zulip_core.update_message_flags(message_ids, flag, op)
+    if result["result"] != "success":
+        return f"Error updating message flags: {result.get('msg', 'Unknown error')}"
+    changed = result.get("messages", [])
+    verb = "Added" if op == "add" else "Removed"
+    out = f"{verb} flag '{flag}' on {len(changed)} message(s): {changed}"
+    # Marking unread skips messages in channels this account is not subscribed to.
+    skipped = result.get("ignored_because_not_subscribed_channels")
+    if skipped:
+        out += f"\nSkipped messages in unsubscribed channel IDs: {skipped}"
+    return out
+
+
+@mcp.tool(tags={WRITE_TAG})
 def edit_message(message_id: int, content: str) -> str:
     """Edit a message the bot previously sent.
 
