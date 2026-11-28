@@ -7,6 +7,7 @@ registration and session state.
 Usage:
     python -m zulipmcp                  # stdio (Claude Code)
     python -m zulipmcp --transport sse  # SSE
+    python -m zulipmcp --transport http [--stateless]  # Streamable HTTP at /mcp
 
 Bot visibility filtering:
     - Topics containing '/nobots' or '/nb' are hidden from the bot (not shown in topic lists or messages)
@@ -25,6 +26,8 @@ from typing import Literal, Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider, RemoteAuthProvider
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.context import Context
 
 from . import core as zulip_core
@@ -64,6 +67,14 @@ mcp = FastMCP(
 # mode. Tagging is UX only; _ReadOnlyAdapter (mounted by _ReadOnlyClient)
 # enforces.
 WRITE_TAG = "write"
+
+# Tag every tool that reads or writes the process-wide _session; run_server()
+# hides them when a client resolver serves several Zulip accounts.
+SESSION_TAG = "session"
+
+# Tag every tool that reads or writes the server's filesystem; run_server()
+# hides them with a client resolver, where callers don't own the host.
+LOCAL_FS_TAG = "local_fs"
 
 PRIVATE_STREAM_ERROR = f"Error: {zulip_core.PRIVATE_STREAM_DENIED}"
 WRITE_STREAM_ERROR = (
@@ -371,7 +382,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     return output
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     """Initialize the session context for a conversation.
     Call this once at the start of a session to set where you're chatting.
@@ -408,7 +419,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     return result
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def reply(content: str) -> str:
     """Reply in the current session context.
 
@@ -512,7 +523,7 @@ def _build_listen_response(visible_messages: list[dict],
     return output
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 async def listen(timeout_hours: float, ctx: Context) -> str:
     """Wait for new messages in the current conversation (blocking).
 
@@ -718,7 +729,7 @@ def _stop_typing_safe():
 _DEFAULT_FAREWELL = ":wave: Signing off"
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def end_session(message: str = _DEFAULT_FAREWELL) -> str:
     """End the current session gracefully.
     Writes a clean exit marker so the listener knows this was intentional.
@@ -1323,7 +1334,7 @@ def list_emoji(query: str = "") -> str:
     return f"{total} custom emoji: {', '.join(matches)}"
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def typing() -> str:
     """Send a typing indicator in the current conversation.
     Call this before heavy tool work (code execution, searches, analysis)
@@ -1342,7 +1353,7 @@ def typing() -> str:
     return "Typing indicator start."
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def stop_typing() -> str:
     """Stop the typing indicator in the current conversation.
     Call this when you've finished working but aren't about to send a message
@@ -1443,7 +1454,7 @@ def get_subscribed_streams() -> str:
 # File tools — downloading and uploading
 # ============================================================================
 
-@mcp.tool()
+@mcp.tool(tags={LOCAL_FS_TAG})
 def fetch_image(path: str) -> str:
     """Fetch an image from Zulip and save it to a temp file for viewing.
 
@@ -1457,7 +1468,7 @@ def fetch_image(path: str) -> str:
     return f"Image saved to: {temp_path}\n\nUse the Read tool to view the image at this path."
 
 
-@mcp.tool()
+@mcp.tool(tags={LOCAL_FS_TAG})
 def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     """Fetch a file uploaded to Zulip and save it locally.
 
@@ -1472,7 +1483,7 @@ def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     return f"File saved to: {saved_path}\nSize: {size_bytes / 1024:.1f} KB\nContent-Type: {content_type}"
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, LOCAL_FS_TAG})
 def upload_file(file_path: str) -> str:
     """Upload a local file to Zulip and return markdown to embed it in messages.
 
@@ -1499,8 +1510,45 @@ def upload_file(file_path: str) -> str:
 # Server entry point
 # ============================================================================
 
-def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
+def _auth_from_env(path: str) -> Optional[AuthProvider]:
+    """Bearer-token auth for network transports, configured by environment.
+
+    Tokens are JWTs from an external OAuth authorization server, checked
+    against its JWKS, issuer and audience. The audience defaults to this
+    server's resource URL (RFC 8707). Unauthenticated requests get a 401
+    pointing at RFC 9728 protected resource metadata. Returns None when no
+    auth variable is set; any other auth variable without
+    ZULIPMCP_AUTH_JWKS_URI (e.g. a misspelling) raises, so partial
+    configuration never starts without auth.
+    """
+    jwks_uri = os.environ.get("ZULIPMCP_AUTH_JWKS_URI", "").strip()
+    if not jwks_uri:
+        stray = sorted(k for k, v in os.environ.items() if v.strip()
+                       and (k.startswith("ZULIPMCP_AUTH_") or k == "ZULIPMCP_BASE_URL"))
+        if stray:
+            raise ValueError(f"{', '.join(stray)} set without ZULIPMCP_AUTH_JWKS_URI.")
+        return None
+    issuer = os.environ.get("ZULIPMCP_AUTH_ISSUER", "").strip()
+    base_url = os.environ.get("ZULIPMCP_BASE_URL", "").strip().rstrip("/")
+    if not issuer or not base_url:
+        raise ValueError("ZULIPMCP_AUTH_JWKS_URI requires ZULIPMCP_AUTH_ISSUER and ZULIPMCP_BASE_URL.")
+    audience = os.environ.get("ZULIPMCP_AUTH_AUDIENCE", "").strip() or base_url + path
+    scopes = os.environ.get("ZULIPMCP_AUTH_REQUIRED_SCOPES", "").split()
+    verifier = JWTVerifier(jwks_uri=jwks_uri, issuer=issuer, audience=audience,
+                           required_scopes=scopes or None)
+    return RemoteAuthProvider(token_verifier=verifier, authorization_servers=[issuer],
+                              base_url=base_url)
+
+
+def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235,
+               stateless: bool = False, auth: Optional[AuthProvider] = None):
     """Start the MCP server.
+
+    ``transport`` is "stdio", "sse" or "http" (Streamable HTTP at /mcp).
+    ``stateless`` serves HTTP without MCP session IDs, for clients that send
+    independent JSON-RPC requests. ``auth`` is any FastMCP auth provider
+    (e.g. an ``OAuthProvider``) for the network transports; when omitted,
+    auth comes from the environment, see :func:`_auth_from_env`.
 
     If ``SESSION_STREAM`` and ``SESSION_TOPIC`` env vars are set, the
     session is auto-initialized before the transport starts — the agent
@@ -1509,19 +1557,37 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
 
     With ``ZULIPMCP_READ_ONLY`` on, write tools are hidden and session
     auto-init is skipped (the session tools don't exist in that mode).
+
+    With a client resolver set (:func:`zulipmcp.core.set_client_resolver`),
+    the session tools (tagged ``SESSION_TAG``) and the local filesystem
+    tools (tagged ``LOCAL_FS_TAG``) are hidden and session auto-init is
+    skipped: one process-wide session and one host filesystem can't be
+    shared by several accounts.
     """
     _setup_logging()
+    # Resolve auth before session auto-init so a bad config stops startup before any Zulip call.
+    if stateless and transport != "http":
+        raise ValueError("stateless applies to the http transport only.")
+    if transport == "stdio":
+        if auth is not None:
+            raise ValueError("auth applies to the sse and http transports only.")
+    else:
+        mcp.auth = auth if auth is not None else _auth_from_env("/mcp" if transport == "http" else "/sse")
     read_only = zulip_core.is_read_only()
     if read_only:
         _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")
         mcp.disable(tags={WRITE_TAG})
+    resolver = zulip_core.has_client_resolver()
+    if resolver:
+        _logger.info("run_server: client resolver set, hiding session and local filesystem tools")
+        mcp.disable(tags={SESSION_TAG, LOCAL_FS_TAG})
 
     # Auto-init session from env vars when both are present.
     stream = os.environ.get("SESSION_STREAM", "").strip() or None
     topic = os.environ.get("SESSION_TOPIC", "").strip() or None
-    if read_only:
+    if read_only or resolver:
         if stream or topic:
-            _logger.warning("run_server: read-only mode, ignoring SESSION_STREAM/SESSION_TOPIC")
+            _logger.warning("run_server: session tools hidden, ignoring SESSION_STREAM/SESSION_TOPIC")
     elif stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:
@@ -1538,6 +1604,10 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
 
     if transport == "stdio":
         mcp.run(transport="stdio")
+        return
+    _logger.info(f"run_server: {transport} transport, auth {'on' if mcp.auth else 'off'}")
+    if transport == "http":
+        mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
     else:
         mcp.run(transport="sse", host=host, port=port)
 

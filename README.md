@@ -78,6 +78,7 @@ Desktop MCP clients often don't inherit your shell's `PATH`; if `zulipmcp` isn't
 |---|---|
 | `uv run python -m zulipmcp` (or `zulipmcp` after `uv tool install`) | MCP server for Claude Code, Codex, and other MCP clients |
 | `uv run python -m zulipmcp --transport sse` | MCP server over SSE (for remote/web clients) |
+| `uv run python -m zulipmcp --transport http [--stateless]` | MCP server over Streamable HTTP at `/mcp`. `--stateless` serves clients that send independent requests without an MCP session ID. Use `--host` to bind beyond `127.0.0.1`. |
 | `uv run python -m zulipmcp.launch_agent` | Launch one MCP-backed coding session without a listener |
 | `uv run python -m zulipmcp.listener` | Listener: watches for @mentions, spawns agent sessions |
 
@@ -262,9 +263,30 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `BOT_ALLOWED_PRIVATE_STREAMS` | Private-stream read/send allowlist. Unset = no private-stream access. Accepts `__ALL__`, a JSON list, or comma-separated names. Without `__ALL__`, reads must name an allowed stream or public channels, and DMs are refused; with it, `search_messages` defaults to `scope="received"`. |
 | `BOT_ALLOWED_WRITE_STREAMS` | Stream send allowlist. Unset = writes allowed everywhere (backwards-compatible). Same formats as above. |
 | `ZULIPMCP_READ_ONLY` | `1`/`true`/`yes`/`on`: the client refuses every non-GET request, and write and session tools are hidden. Unset, empty or `0`/`false`/`no`/`off` = off; anything else is a startup error. See [Read as yourself, post as a bot](#read-as-yourself-post-as-a-bot). |
+| `ZULIPMCP_AUTH_JWKS_URI` | Enables bearer-token auth on the `sse`/`http` transports: tokens must be JWTs signed by a key from this JWKS URL, issued by an external OAuth authorization server. Unauthenticated requests get a `401` pointing at RFC 9728 protected resource metadata. Unset = no auth (keep the server on localhost). |
+| `ZULIPMCP_AUTH_ISSUER` | Required with `ZULIPMCP_AUTH_JWKS_URI`: expected `iss` claim, advertised as the authorization server. |
+| `ZULIPMCP_BASE_URL` | Required with `ZULIPMCP_AUTH_JWKS_URI`: public base URL of this server, e.g. `https://mcp.example.com`. |
+| `ZULIPMCP_AUTH_AUDIENCE` | Expected `aud` claim. Defaults to the resource URL, `ZULIPMCP_BASE_URL` + `/mcp` (or `/sse`). |
+| `ZULIPMCP_AUTH_REQUIRED_SCOPES` | Space-separated scopes every token must carry. Optional. |
 | `ZULIPMCP_CACHE_DIR` | Override the disk cache base directory (defaults to system temp dir). Each site and account gets its own subdirectory, so servers running as different users never share cached data. |
 | `ZULIPMCP_LOG_DIR` | Server log directory (defaults to `/tmp/zulipmcp_logs`); written by `run_server()`, never on import. |
 | `ZULIPMCP_MARKDOWN_AUTOFIX` | Disables all outgoing markdown normalization (blank-line-before-table injection and bold/link rewrites) when set to `0` or `false`. Defaults to enabled. |
+
+Without a client resolver (below), network transports serve one Zulip identity (the `.zuliprc` account) and one session to every client: anyone holding a valid token acts as that account.
+
+To use another FastMCP auth provider (e.g. an `OAuthProvider` that runs its own authorization server), pass it from Python; it replaces the `ZULIPMCP_AUTH_*` variables:
+
+```python
+from zulipmcp.mcp import run_server
+run_server(transport="http", host="0.0.0.0", auth=my_provider)
+```
+
+To act as a different Zulip account per request, set a client resolver before `run_server()`. It is called on every Zulip call and returns the `zulip.Client` for the current caller, e.g. looked up from FastMCP's `get_access_token()`. The zuliprc is then never read, and anything the resolver raises fails that tool call before any Zulip request. The session tools (`set_context`, `reply`, `listen`, `end_session`, `typing`, `stop_typing`, tagged `SESSION_TAG`) are hidden and `SESSION_STREAM`/`SESSION_TOPIC` are ignored, since their state is process-wide. The tools that read or write the server's filesystem (`fetch_image`, `fetch_file`, `upload_file`, tagged `LOCAL_FS_TAG`) are hidden too, since every caller would share the host's files. `ZULIPMCP_READ_ONLY` is not supported with a resolver.
+
+```python
+from zulipmcp.core import set_client_resolver
+set_client_resolver(lambda: client_for(get_access_token()))
+```
 
 ## License
 
