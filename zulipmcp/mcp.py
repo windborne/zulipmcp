@@ -68,6 +68,14 @@ mcp = FastMCP(
 # enforces.
 WRITE_TAG = "write"
 
+# Tag every tool that reads or writes the process-wide _session; run_server()
+# hides them when a client resolver serves several Zulip accounts.
+SESSION_TAG = "session"
+
+# Tag every tool that reads or writes the server's filesystem; run_server()
+# hides them with a client resolver, where callers don't own the host.
+LOCAL_FS_TAG = "local_fs"
+
 PRIVATE_STREAM_ERROR = f"Error: {zulip_core.PRIVATE_STREAM_DENIED}"
 WRITE_STREAM_ERROR = (
     "Error: Stream write access denied for this session. "
@@ -374,7 +382,7 @@ def _init_session(stream: str, topic: str, num_messages: int = 0) -> str:
     return output
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     """Initialize the session context for a conversation.
     Call this once at the start of a session to set where you're chatting.
@@ -411,7 +419,7 @@ def set_context(stream: str, topic: str, num_messages: int = 20) -> str:
     return result
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def reply(content: str) -> str:
     """Reply in the current session context.
 
@@ -515,7 +523,7 @@ def _build_listen_response(visible_messages: list[dict],
     return output
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 async def listen(timeout_hours: float, ctx: Context) -> str:
     """Wait for new messages in the current conversation (blocking).
 
@@ -721,7 +729,7 @@ def _stop_typing_safe():
 _DEFAULT_FAREWELL = ":wave: Signing off"
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def end_session(message: str = _DEFAULT_FAREWELL) -> str:
     """End the current session gracefully.
     Writes a clean exit marker so the listener knows this was intentional.
@@ -1326,7 +1334,7 @@ def list_emoji(query: str = "") -> str:
     return f"{total} custom emoji: {', '.join(matches)}"
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def typing() -> str:
     """Send a typing indicator in the current conversation.
     Call this before heavy tool work (code execution, searches, analysis)
@@ -1345,7 +1353,7 @@ def typing() -> str:
     return "Typing indicator start."
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, SESSION_TAG})
 def stop_typing() -> str:
     """Stop the typing indicator in the current conversation.
     Call this when you've finished working but aren't about to send a message
@@ -1446,7 +1454,7 @@ def get_subscribed_streams() -> str:
 # File tools — downloading and uploading
 # ============================================================================
 
-@mcp.tool()
+@mcp.tool(tags={LOCAL_FS_TAG})
 def fetch_image(path: str) -> str:
     """Fetch an image from Zulip and save it to a temp file for viewing.
 
@@ -1460,7 +1468,7 @@ def fetch_image(path: str) -> str:
     return f"Image saved to: {temp_path}\n\nUse the Read tool to view the image at this path."
 
 
-@mcp.tool()
+@mcp.tool(tags={LOCAL_FS_TAG})
 def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     """Fetch a file uploaded to Zulip and save it locally.
 
@@ -1475,7 +1483,7 @@ def fetch_file(path: str, save_dir: Optional[str] = None) -> str:
     return f"File saved to: {saved_path}\nSize: {size_bytes / 1024:.1f} KB\nContent-Type: {content_type}"
 
 
-@mcp.tool(tags={WRITE_TAG})
+@mcp.tool(tags={WRITE_TAG, LOCAL_FS_TAG})
 def upload_file(file_path: str) -> str:
     """Upload a local file to Zulip and return markdown to embed it in messages.
 
@@ -1549,6 +1557,12 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
 
     With ``ZULIPMCP_READ_ONLY`` on, write tools are hidden and session
     auto-init is skipped (the session tools don't exist in that mode).
+
+    With a client resolver set (:func:`zulipmcp.core.set_client_resolver`),
+    the session tools (tagged ``SESSION_TAG``) and the local filesystem
+    tools (tagged ``LOCAL_FS_TAG``) are hidden and session auto-init is
+    skipped: one process-wide session and one host filesystem can't be
+    shared by several accounts.
     """
     _setup_logging()
     # Resolve auth before session auto-init so a bad config stops startup before any Zulip call.
@@ -1563,13 +1577,17 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     if read_only:
         _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")
         mcp.disable(tags={WRITE_TAG})
+    resolver = zulip_core.has_client_resolver()
+    if resolver:
+        _logger.info("run_server: client resolver set, hiding session and local filesystem tools")
+        mcp.disable(tags={SESSION_TAG, LOCAL_FS_TAG})
 
     # Auto-init session from env vars when both are present.
     stream = os.environ.get("SESSION_STREAM", "").strip() or None
     topic = os.environ.get("SESSION_TOPIC", "").strip() or None
-    if read_only:
+    if read_only or resolver:
         if stream or topic:
-            _logger.warning("run_server: read-only mode, ignoring SESSION_STREAM/SESSION_TOPIC")
+            _logger.warning("run_server: session tools hidden, ignoring SESSION_STREAM/SESSION_TOPIC")
     elif stream and topic:
         _logger.info(f"run_server: auto-init session from env: stream={stream}, topic={topic}")
         try:

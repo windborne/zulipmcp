@@ -272,13 +272,20 @@ Topics containing `/nobots` or `/nb` are hidden from the bot entirely. Messages 
 | `ZULIPMCP_LOG_DIR` | Server log directory (defaults to `/tmp/zulipmcp_logs`); written by `run_server()`, never on import. |
 | `ZULIPMCP_MARKDOWN_AUTOFIX` | Disables all outgoing markdown normalization (blank-line-before-table injection and bold/link rewrites) when set to `0` or `false`. Defaults to enabled. |
 
-Network transports serve one Zulip identity (the `.zuliprc` account) and one session to every client: anyone holding a valid token acts as that account.
+Without a client resolver (below), network transports serve one Zulip identity (the `.zuliprc` account) and one session to every client: anyone holding a valid token acts as that account.
 
 To use another FastMCP auth provider (e.g. an `OAuthProvider` that runs its own authorization server), pass it from Python; it replaces the `ZULIPMCP_AUTH_*` variables:
 
 ```python
 from zulipmcp.mcp import run_server
 run_server(transport="http", host="0.0.0.0", auth=my_provider)
+```
+
+To act as a different Zulip account per request, set a client resolver before `run_server()`. It is called on every Zulip call and returns the `zulip.Client` for the current caller, e.g. looked up from FastMCP's `get_access_token()`. The zuliprc is then never read, and anything the resolver raises fails that tool call before any Zulip request. The session tools (`set_context`, `reply`, `listen`, `end_session`, `typing`, `stop_typing`, tagged `SESSION_TAG`) are hidden and `SESSION_STREAM`/`SESSION_TOPIC` are ignored, since their state is process-wide. The tools that read or write the server's filesystem (`fetch_image`, `fetch_file`, `upload_file`, tagged `LOCAL_FS_TAG`) are hidden too, since every caller would share the host's files. `ZULIPMCP_READ_ONLY` is not supported with a resolver.
+
+```python
+from zulipmcp.core import set_client_resolver
+set_client_resolver(lambda: client_for(get_access_token()))
 ```
 
 ## License

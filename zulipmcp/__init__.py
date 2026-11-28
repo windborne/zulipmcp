@@ -5,6 +5,7 @@ from .core import (
     ReadOnlyError,
     is_read_only,
     get_client,
+    set_client_resolver,
     get_user_email,
     resolve_name,
     is_stream_private,

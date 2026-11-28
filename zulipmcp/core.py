@@ -33,6 +33,7 @@ def _load_timezone() -> ZoneInfo:
 TIMEZONE = _load_timezone()
 
 _client: Optional[zulip.Client] = None
+_client_resolver: Optional[Callable[[], zulip.Client]] = None
 _ignored_streams: set[str] = set()
 _ALL_PRIVATE_STREAMS = "__ALL__"
 _dismiss_emoji: set[str] = {"stop_sign"}
@@ -487,17 +488,42 @@ class _ReadOnlyClient(zulip.Client):
             self.session.mount(prefix, _ReadOnlyAdapter())
 
 
+def set_client_resolver(resolver: Optional[Callable[[], zulip.Client]]) -> None:
+    """Make :func:`get_client` return ``resolver()`` on every call; None restores the zuliprc.
+
+    For servers that act as a different Zulip account per request: the
+    resolver picks the client for the current caller (e.g. from the
+    request's access token). Whatever it raises propagates out of
+    :func:`get_client`, before any Zulip request; there is no fallback to
+    the zuliprc. ``ZULIPMCP_READ_ONLY`` is not supported with a resolver.
+    """
+    global _client_resolver
+    _client_resolver = resolver
+
+
+def has_client_resolver() -> bool:
+    """Whether :func:`set_client_resolver` installed a resolver."""
+    return _client_resolver is not None
+
+
 def get_client() -> zulip.Client:
     """Get or create the Zulip client singleton.
 
     Config resolution order:
-        1. ZULIP_RC_PATH environment variable (absolute path to zuliprc)
-        2. .zuliprc in the current working directory
+        1. the resolver from :func:`set_client_resolver`, called on every
+           call (the zuliprc is then never read)
+        2. ZULIP_RC_PATH environment variable (absolute path to zuliprc)
+        3. .zuliprc in the current working directory
 
     With ``ZULIPMCP_READ_ONLY`` on, the client raises :class:`ReadOnlyError`
     for every non-GET request.
     """
     global _client
+    if _client_resolver is not None:
+        # The guard lives on clients this module builds; a resolver's client can't be vouched for.
+        if is_read_only():
+            raise ReadOnlyError("ZULIPMCP_READ_ONLY is not supported with a client resolver")
+        return _client_resolver()
     if _client is None:
         import os
         import sys
@@ -649,15 +675,17 @@ def _human_user_id() -> Optional[int]:
     global _account
     try:
         client = get_client()
-        if _account is None or _account[0] is not client:
+        # Read the global once: a concurrent call for another account may replace it.
+        account = _account
+        if account is None or account[0] is not client:
             profile = client.get_profile()
             if profile.get("result") != "success":
                 return None
             human = profile.get("is_bot") is False
-            _account = (client, profile.get("user_id") if human else None)
+            account = _account = (client, profile.get("user_id") if human else None)
     except (OSError, zulip.ZulipError):
         return None
-    return _account[1]
+    return account[1]
 
 
 # For format_messages: message text and names are attacker-controlled, so every
