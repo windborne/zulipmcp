@@ -7,6 +7,7 @@ registration and session state.
 Usage:
     python -m zulipmcp                  # stdio (Claude Code)
     python -m zulipmcp --transport sse  # SSE
+    python -m zulipmcp --transport http [--stateless]  # Streamable HTTP at /mcp
 
 Bot visibility filtering:
     - Topics containing '/nobots' or '/nb' are hidden from the bot (not shown in topic lists or messages)
@@ -25,6 +26,8 @@ from typing import Literal, Optional
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider, RemoteAuthProvider
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.context import Context
 
 from . import core as zulip_core
@@ -1499,8 +1502,45 @@ def upload_file(file_path: str) -> str:
 # Server entry point
 # ============================================================================
 
-def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235):
+def _auth_from_env(path: str) -> Optional[AuthProvider]:
+    """Bearer-token auth for network transports, configured by environment.
+
+    Tokens are JWTs from an external OAuth authorization server, checked
+    against its JWKS, issuer and audience. The audience defaults to this
+    server's resource URL (RFC 8707). Unauthenticated requests get a 401
+    pointing at RFC 9728 protected resource metadata. Returns None when no
+    auth variable is set; any other auth variable without
+    ZULIPMCP_AUTH_JWKS_URI (e.g. a misspelling) raises, so partial
+    configuration never starts without auth.
+    """
+    jwks_uri = os.environ.get("ZULIPMCP_AUTH_JWKS_URI", "").strip()
+    if not jwks_uri:
+        stray = sorted(k for k, v in os.environ.items() if v.strip()
+                       and (k.startswith("ZULIPMCP_AUTH_") or k == "ZULIPMCP_BASE_URL"))
+        if stray:
+            raise ValueError(f"{', '.join(stray)} set without ZULIPMCP_AUTH_JWKS_URI.")
+        return None
+    issuer = os.environ.get("ZULIPMCP_AUTH_ISSUER", "").strip()
+    base_url = os.environ.get("ZULIPMCP_BASE_URL", "").strip().rstrip("/")
+    if not issuer or not base_url:
+        raise ValueError("ZULIPMCP_AUTH_JWKS_URI requires ZULIPMCP_AUTH_ISSUER and ZULIPMCP_BASE_URL.")
+    audience = os.environ.get("ZULIPMCP_AUTH_AUDIENCE", "").strip() or base_url + path
+    scopes = os.environ.get("ZULIPMCP_AUTH_REQUIRED_SCOPES", "").split()
+    verifier = JWTVerifier(jwks_uri=jwks_uri, issuer=issuer, audience=audience,
+                           required_scopes=scopes or None)
+    return RemoteAuthProvider(token_verifier=verifier, authorization_servers=[issuer],
+                              base_url=base_url)
+
+
+def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8235,
+               stateless: bool = False, auth: Optional[AuthProvider] = None):
     """Start the MCP server.
+
+    ``transport`` is "stdio", "sse" or "http" (Streamable HTTP at /mcp).
+    ``stateless`` serves HTTP without MCP session IDs, for clients that send
+    independent JSON-RPC requests. ``auth`` is any FastMCP auth provider
+    (e.g. an ``OAuthProvider``) for the network transports; when omitted,
+    auth comes from the environment, see :func:`_auth_from_env`.
 
     If ``SESSION_STREAM`` and ``SESSION_TOPIC`` env vars are set, the
     session is auto-initialized before the transport starts — the agent
@@ -1511,6 +1551,14 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
     auto-init is skipped (the session tools don't exist in that mode).
     """
     _setup_logging()
+    # Resolve auth before session auto-init so a bad config stops startup before any Zulip call.
+    if stateless and transport != "http":
+        raise ValueError("stateless applies to the http transport only.")
+    if transport == "stdio":
+        if auth is not None:
+            raise ValueError("auth applies to the sse and http transports only.")
+    else:
+        mcp.auth = auth if auth is not None else _auth_from_env("/mcp" if transport == "http" else "/sse")
     read_only = zulip_core.is_read_only()
     if read_only:
         _logger.info("run_server: ZULIPMCP_READ_ONLY set, hiding write tools")
@@ -1538,6 +1586,10 @@ def run_server(transport: str = "stdio", host: str = "127.0.0.1", port: int = 82
 
     if transport == "stdio":
         mcp.run(transport="stdio")
+        return
+    _logger.info(f"run_server: {transport} transport, auth {'on' if mcp.auth else 'off'}")
+    if transport == "http":
+        mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
     else:
         mcp.run(transport="sse", host=host, port=port)
 
