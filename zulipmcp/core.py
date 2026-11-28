@@ -1147,6 +1147,15 @@ def remove_reaction(message_id: int, emoji_name: str,
     return get_client().remove_reaction(params)
 
 
+def update_message_flags(message_ids: list[int], flag: str, op: str) -> dict:
+    """Add or remove a personal message flag (e.g. "starred", "read"). Returns API result dict."""
+    return get_client().update_message_flags({
+        "messages": message_ids,
+        "op": op,
+        "flag": flag,
+    })
+
+
 def edit_message(message_id: int, content: str) -> dict:
     """Edit a message's content. Returns API result dict."""
     _, err = _get_stream_message_for_write(message_id)
